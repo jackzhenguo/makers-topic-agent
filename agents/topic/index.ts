@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   collectGatewayEnv,
   hasAnthropicCredentials,
@@ -65,13 +66,22 @@ const SYSTEM_PROMPT = [
 ].join("\n");
 
 const DEFAULT_USER_MESSAGE = "请基于 data 素材库，生成 5 个适合账号当前定位的高点击选题。";
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+const dataRootCandidates = [
+  process.cwd(),
+  path.resolve(moduleDir, "..", ".."),
+  path.resolve(process.cwd(), "..")
+];
 
 async function readText(relativePath: string, fallback = ""): Promise<string> {
-  try {
-    return await readFile(path.join(process.cwd(), relativePath), "utf8");
-  } catch {
-    return fallback;
+  for (const root of dataRootCandidates) {
+    try {
+      return await readFile(path.join(root, relativePath), "utf8");
+    } catch {
+      // Try the next likely root. Makers may run the Agent from a generated runtime dir.
+    }
   }
+  return fallback;
 }
 
 async function readJson<T>(relativePath: string, fallback: T): Promise<T> {

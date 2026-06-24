@@ -4,6 +4,8 @@ const state = {
   lastRaw: null,
   parsed: null
 };
+const conversationKey = "makers-topic-agent.conversation-id";
+const conversationIdPattern = /^[0-9A-Za-z_.-]{6,36}$/;
 
 const els = {
   modeLabel: document.querySelector("#modeLabel"),
@@ -70,6 +72,15 @@ function splitOutline(outline) {
     .map((item) => item.replace(/^[-*]\s*/, "").trim())
     .filter(Boolean)
     .slice(0, 8);
+}
+
+function getConversationId() {
+  const existing = localStorage.getItem(conversationKey);
+  if (existing && conversationIdPattern.test(existing)) return existing;
+
+  const id = window.crypto?.randomUUID?.() || `chat-${Math.random().toString(36).slice(2, 14)}`;
+  localStorage.setItem(conversationKey, id);
+  return id;
 }
 
 function extractJsonFromAnswer(answer) {
@@ -222,7 +233,7 @@ async function generate() {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Makers-Conversation-Id": `web.${Date.now().toString(36)}`
+        "Makers-Conversation-Id": getConversationId()
       },
       body: JSON.stringify({ message, local: state.mode === "local" })
     });
