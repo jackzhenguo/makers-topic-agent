@@ -95,7 +95,32 @@ async function readJson<T>(relativePath: string, fallback: T): Promise<T> {
   }
 }
 
-async function loadKnowledgeBase(): Promise<KnowledgeBase> {
+function hasKnowledge(kb: KnowledgeBase): boolean {
+  return Boolean(kb.account.trim() || kb.rules.trim() || kb.hotUrls.length || kb.recentArticles.length);
+}
+
+async function fetchTextFromPublic(baseUrl: string, relativePath: string, fallback = ""): Promise<string> {
+  try {
+    const response = await fetch(new URL(relativePath, baseUrl));
+    if (!response.ok) return fallback;
+    return await response.text();
+  } catch {
+    return fallback;
+  }
+}
+
+async function fetchJsonFromPublic<T>(baseUrl: string, relativePath: string, fallback: T): Promise<T> {
+  const text = await fetchTextFromPublic(baseUrl, relativePath, "");
+  if (!text) return fallback;
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+async function loadKnowledgeBase(context?: AgentContext): Promise<KnowledgeBase> {
   const [account, rules, hotUrls, recentArticles] = await Promise.all([
     readText("data/account.md"),
     readText("data/rules.md"),
@@ -103,7 +128,23 @@ async function loadKnowledgeBase(): Promise<KnowledgeBase> {
     readJson<RecentArticle[]>("data/recent-articles.json", [])
   ]);
 
-  return { account, rules, hotUrls, recentArticles };
+  const fromFiles = { account, rules, hotUrls, recentArticles };
+  if (hasKnowledge(fromFiles) || !context?.request?.url) return fromFiles;
+
+  const publicBaseUrl = new URL(context.request.url).origin;
+  const [publicAccount, publicRules, publicHotUrls, publicRecentArticles] = await Promise.all([
+    fetchTextFromPublic(publicBaseUrl, "/data/account.md"),
+    fetchTextFromPublic(publicBaseUrl, "/data/rules.md"),
+    fetchJsonFromPublic<HotUrl[]>(publicBaseUrl, "/data/hot-urls.json", []),
+    fetchJsonFromPublic<RecentArticle[]>(publicBaseUrl, "/data/recent-articles.json", [])
+  ]);
+
+  return {
+    account: publicAccount,
+    rules: publicRules,
+    hotUrls: publicHotUrls,
+    recentArticles: publicRecentArticles
+  };
 }
 
 async function parseBody(context: AgentContext): Promise<Record<string, unknown>> {
@@ -395,7 +436,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
 
   let kb: KnowledgeBase;
   try {
-    kb = await loadKnowledgeBase();
+    kb = await loadKnowledgeBase(context);
   } catch (error) {
     return jsonResponse({ ok: false, error: (error as Error).message }, 500);
   }
