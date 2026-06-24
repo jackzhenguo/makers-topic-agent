@@ -1,0 +1,15 @@
+{
+  "name": "makers-topic-agent",
+  "installCommand": "npm install",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "nodeVersion": "22.11.0",
+  "agents": {
+    "framework": "claude-agent-sdk",
+    "dir": "agents",
+    "timeout": 300,
+    "sandbox": {
+      "timeout": 300
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "makers-topic-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx scripts/local-run.mjs",
+    "dev:local": "tsx scripts/local-run.mjs --local",
+    "dev:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev.ps1",
+    "web": "tsx scripts/web-server.mjs",
+    "web:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/stop-web.ps1",
+    "web:restart": "npm run web:stop && npm run web",
+    "config:deepseek": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/config-deepseek.ps1",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && node scripts/build-static.mjs",
+    "makers:dev": "edgeone makers dev",
+    "makers:link": "edgeone makers link",
+    "makers:deploy": "edgeone makers deploy -n makers-topic-agent"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.187",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.3",
+    "edgeone": "^1.6.5",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

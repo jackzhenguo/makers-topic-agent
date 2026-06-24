@@ -1,0 +1,20 @@
+[
+  {
+    "title": "字节跳动火山引擎发布豆包大模型 2.1 Pro",
+    "url": "https://seed.bytedance.com/en/blog/seed2-1-officially-released-advancing-ai-productivity",
+    "note": "来自郭震AI 2026-06-24 每日快讯。Doubao Seed 2.1 已向豆包和火山引擎用户开放，重点增强多模态、软件工程工作流和通用 Agent 能力。适合写成国产大模型升级、Agent 云服务体系、普通创作者如何使用豆包新能力的选题。",
+    "tags": ["豆包", "大模型", "多模态", "Agent", "火山引擎"]
+  },
+  {
+    "title": "Anthropic 发布 Claude Tag，让团队在 Slack 中 @Claude 协作",
+    "url": "https://www.anthropic.com/news/introducing-claude-tag",
+    "note": "来自郭震AI 2026-06-24 每日快讯。Claude Tag 先从 Slack 场景开始，允许团队把频道、工具、数据和代码库授权给 Claude，再通过 @Claude 委派任务。适合写成企业协作智能体、团队上下文共享、Slack 工作流自动化的选题。",
+    "tags": ["Claude", "Anthropic", "Agent工具", "Slack", "企业协作"]
+  },
+  {
+    "title": "OpenAI 发布 Codex Remote 工程实践，强化远程智能体控制面板",
+    "url": "https://developers.openai.com/blog/mastering-codex-remote-for-engineering",
+    "note": "来自郭震AI 2026-06-24 每日快讯。Codex Remote 的重点是让用户从手机端启动、指导、审查和组织运行在开发机器上的 Codex 任务，并新增远程主机连接、worktree、目标、侧边对话、内联代码审查、技能和插件等能力。适合写成远程编程 Agent、移动端管理开发任务、Codex 工作流升级的选题。",
+    "tags": ["OpenAI", "Codex", "AI编程", "远程智能体", "开发者工具"]
+  }
+]

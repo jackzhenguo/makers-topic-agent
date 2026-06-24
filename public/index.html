@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Makers Topic Agent</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js" defer></script>
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Makers Topic Agent</p>
+          <h1>公众号选题工作台</h1>
+        </div>
+        <div class="status-row">
+          <span class="status-pill" id="modeLabel">DeepSeek</span>
+          <span class="status-pill muted" id="materialLabel">读取素材中</span>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="source-panel">
+          <div class="panel-head">
+            <h2>素材库</h2>
+            <button class="icon-button" id="refreshBtn" type="button" title="刷新素材" aria-label="刷新素材">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+          </div>
+          <div class="source-block">
+            <div class="block-title">
+              <span>热点链接</span>
+              <strong id="hotCount">0</strong>
+            </div>
+            <div class="source-list" id="hotList"></div>
+          </div>
+          <div class="source-block">
+            <div class="block-title">
+              <span>最近文章</span>
+              <strong id="articleCount">0</strong>
+            </div>
+            <div class="source-list" id="articleList"></div>
+          </div>
+        </aside>
+
+        <section class="main-panel">
+          <div class="composer">
+            <div class="composer-head">
+              <div>
+                <h2>生成请求</h2>
+                <p id="runtimeHint">真实模型可能需要 30-120 秒</p>
+              </div>
+              <div class="segmented" role="group" aria-label="运行模式">
+                <button class="segment active" id="modelModeBtn" type="button">DeepSeek</button>
+                <button class="segment" id="localModeBtn" type="button">Local</button>
+              </div>
+            </div>
+            <textarea id="promptInput" rows="4">结合最近三篇文章和 6.24 热点，生成 5 个适合公众号的高点击选题，避免和最近文章重复。</textarea>
+            <div class="action-row">
+              <button class="primary-button" id="generateBtn" type="button">
+                <i data-lucide="sparkles"></i>
+                <span>生成选题</span>
+              </button>
+              <button class="secondary-button" id="copyJsonBtn" type="button">
+                <i data-lucide="copy"></i>
+                <span>复制 JSON</span>
+              </button>
+              <button class="secondary-button" id="downloadBtn" type="button">
+                <i data-lucide="download"></i>
+                <span>下载结果</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="result-toolbar">
+            <div>
+              <p class="eyebrow">Result</p>
+              <h2 id="resultTitle">等待生成</h2>
+            </div>
+            <span class="status-pill muted" id="requestStatus">Ready</span>
+          </div>
+
+          <div class="recommended" id="recommendedCard">
+            <span class="tag">推荐首发</span>
+            <h3>生成后会显示最适合首发的选题</h3>
+            <p>右侧会同步生成公众号风格预览。</p>
+          </div>
+
+          <div class="topic-grid" id="topicGrid"></div>
+        </section>
+
+        <aside class="preview-panel">
+          <div class="panel-head">
+            <h2>公众号预览</h2>
+            <button class="icon-button" id="copyPreviewBtn" type="button" title="复制预览" aria-label="复制预览">
+              <i data-lucide="clipboard"></i>
+            </button>
+          </div>
+          <article class="phone-preview" id="phonePreview">
+            <div class="preview-topline"></div>
+            <h3>选题生成后显示标题</h3>
+            <p class="preview-meta">郭震AI · 今日选题</p>
+            <p class="preview-summary">这里会展示首推选题的切入角度、为什么现在写、以及文章结构。</p>
+            <div class="preview-section">
+              <span>文章结构</span>
+              <ol id="previewOutline">
+                <li>等待生成</li>
+              </ol>
+            </div>
+          </article>
+          <details class="raw-box">
+            <summary>原始返回</summary>
+            <pre id="rawOutput">{}</pre>
+          </details>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,458 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import {
+  collectGatewayEnv,
+  hasAnthropicCredentials,
+  hasMakersCredentials,
+  resolveMakersApiKey,
+  resolveMakersBaseUrl,
+  resolveModelName
+} from "../_model";
+
+type Env = Record<string, string | undefined>;
+
+interface AgentContext {
+  request?: {
+    body?: unknown;
+    method?: string;
+    url?: string;
+    signal?: AbortSignal;
+    json?: () => Promise<unknown>;
+    text?: () => Promise<string>;
+  };
+  env?: Env;
+  conversation_id?: string;
+  store?: {
+    appendMessage?: (message: Record<string, unknown>) => Promise<void>;
+    claudeSessionStore?: () => unknown;
+    claude_session_store?: () => unknown;
+  };
+  tools?: {
+    toClaudeMcpServer?: () => {
+      name: string;
+      tools: unknown;
+      allowedTools?: string[];
+    };
+  };
+}
+
+interface HotUrl {
+  title: string;
+  url: string;
+  note?: string;
+  tags?: string[];
+}
+
+interface RecentArticle {
+  title: string;
+  url?: string;
+  summary: string;
+  takeaways?: string[];
+}
+
+interface KnowledgeBase {
+  account: string;
+  rules: string;
+  hotUrls: HotUrl[];
+  recentArticles: RecentArticle[];
+}
+
+const SYSTEM_PROMPT = [
+  "你是 makers-topic-agent，一个服务于公众号/视频号内容生产的选题 Agent。",
+  "你必须优先使用项目 data/ 目录中的账号定位、内容规则、热点网址和最近三篇文章作为判断依据。",
+  "输出要偏实战、偏差异化，不要泛泛推荐热点；每个选题都要说明读者为什么现在应该点开。",
+  "如果素材不足，明确指出缺口，并给出下一步补充素材建议。"
+].join("\n");
+
+const DEFAULT_USER_MESSAGE = "请基于 data 素材库，生成 5 个适合账号当前定位的高点击选题。";
+
+async function readText(relativePath: string, fallback = ""): Promise<string> {
+  try {
+    return await readFile(path.join(process.cwd(), relativePath), "utf8");
+  } catch {
+    return fallback;
+  }
+}
+
+async function readJson<T>(relativePath: string, fallback: T): Promise<T> {
+  const raw = await readText(relativePath);
+  if (!raw.trim()) return fallback;
+
+  try {
+    return JSON.parse(raw) as T;
+  } catch (error) {
+    throw new Error(`Failed to parse ${relativePath}: ${(error as Error).message}`);
+  }
+}
+
+async function loadKnowledgeBase(): Promise<KnowledgeBase> {
+  const [account, rules, hotUrls, recentArticles] = await Promise.all([
+    readText("data/account.md"),
+    readText("data/rules.md"),
+    readJson<HotUrl[]>("data/hot-urls.json", []),
+    readJson<RecentArticle[]>("data/recent-articles.json", [])
+  ]);
+
+  return { account, rules, hotUrls, recentArticles };
+}
+
+async function parseBody(context: AgentContext): Promise<Record<string, unknown>> {
+  const body = context.request?.body;
+  if (body && typeof body === "object" && !Array.isArray(body)) {
+    return body as Record<string, unknown>;
+  }
+
+  if (typeof body === "string" && body.trim()) {
+    return JSON.parse(body) as Record<string, unknown>;
+  }
+
+  if (typeof context.request?.json === "function") {
+    const parsed = await context.request.json();
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  }
+
+  if (typeof context.request?.text === "function") {
+    const text = await context.request.text();
+    if (text.trim()) {
+      return JSON.parse(text) as Record<string, unknown>;
+    }
+  }
+
+  return {};
+}
+
+function jsonResponse(data: unknown, status = 200): Response {
+  return new Response(JSON.stringify(data, null, 2), {
+    status,
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Headers": "Content-Type, Makers-Conversation-Id",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS"
+    }
+  });
+}
+
+function firstLines(markdown: string, maxLines: number): string[] {
+  return markdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .slice(0, maxLines);
+}
+
+function makeLocalTopicPlan(message: string, kb: KnowledgeBase) {
+  const urls = kb.hotUrls.slice(0, 8);
+  const articles = kb.recentArticles.slice(0, 3);
+  const accountSignals = firstLines(kb.account, 6);
+  const ruleSignals = firstLines(kb.rules, 8);
+
+  const candidates = urls.slice(0, 5).map((item, index) => {
+    const article = articles[index % Math.max(articles.length, 1)];
+    const sourceHint = item.note || item.title;
+    const priorHint = article ? `延续《${article.title}》的读者兴趣，但换成更当前的切入点。` : "补齐最近三篇文章后，可进一步校准账号连续性。";
+
+    return {
+      title: `${item.title}：普通人能马上用上的 ${index + 1} 个切口`,
+      angle: `从“${sourceHint}”切入，强调真实场景、操作路径和避坑判断。`,
+      whyNow: "热点正在发生，读者需要有人把信息压缩成可执行判断。",
+      fitWithAccount: accountSignals[0] || "围绕 AI 工具、Agent 和自动化实战做可落地内容。",
+      continuity: priorHint,
+      outline: [
+        "一句话讲清楚这个变化到底是什么",
+        "给出 2-3 个普通用户或创作者能复用的场景",
+        "拆一条最小实操路径",
+        "补充风险、门槛或替代方案",
+        "收束成账号自己的判断和行动建议"
+      ],
+      sourceUrl: item.url,
+      tags: item.tags ?? []
+    };
+  });
+
+  if (candidates.length === 0) {
+    candidates.push({
+      title: "先补热点素材：当前 data/hot-urls.json 为空",
+      angle: "把今天最值得跟进的 5-10 个网址放进 data/hot-urls.json 后再生成正式选题。",
+      whyNow: "选题质量取决于热点素材的新鲜度和账号连续性。",
+      fitWithAccount: accountSignals[0] || "账号定位尚未填写。",
+      continuity: articles[0] ? `可参考最近文章《${articles[0].title}》。` : "最近三篇文章也为空，建议同步补齐。",
+      outline: ["补热点网址", "补最近三篇文章", "重新运行 Agent"],
+      sourceUrl: "",
+      tags: []
+    });
+  }
+
+  return {
+    request: message,
+    accountSignals,
+    ruleSignals,
+    recentArticleSignals: articles.map((article) => ({
+      title: article.title,
+      summary: article.summary,
+      takeaways: article.takeaways ?? []
+    })),
+    candidates,
+    recommended: candidates[0],
+    nextDataActions: [
+      "把今天确认要追的热点链接更新到 data/hot-urls.json",
+      "把最近三篇公众号文章的标题、链接、摘要更新到 data/recent-articles.json",
+      "如果账号定位变化，先改 data/account.md，再跑一次选题"
+    ]
+  };
+}
+
+function buildClaudePrompt(message: string, kb: KnowledgeBase): string {
+  return [
+    `用户请求：${message}`,
+    "",
+    "账号定位：",
+    kb.account || "(data/account.md 为空)",
+    "",
+    "内容规则：",
+    kb.rules || "(data/rules.md 为空)",
+    "",
+    "热点网址 JSON：",
+    JSON.stringify(kb.hotUrls, null, 2),
+    "",
+    "最近三篇文章 JSON：",
+    JSON.stringify(kb.recentArticles, null, 2),
+    "",
+    "请输出 JSON，字段包含 summary、topics、recommended、missingData。topics 至少 5 条，每条包含 title、angle、whyNow、outline、sourceUrl。"
+  ].join("\n");
+}
+
+interface MakersChatResponse {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+    delta?: {
+      content?: string;
+    };
+  }>;
+  error?: {
+    message?: string;
+  };
+}
+
+async function runMakersModel(message: string, kb: KnowledgeBase, env: Env): Promise<string> {
+  const apiKey = resolveMakersApiKey(env);
+  if (!apiKey) {
+    throw new Error("Missing MAKERS_MODELS_KEY or AI_GATEWAY_API_KEY.");
+  }
+
+  const baseUrl = resolveMakersBaseUrl(env).replace(/\/$/, "");
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: resolveModelName(env),
+      temperature: 0.7,
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: buildClaudePrompt(message, kb) }
+      ]
+    })
+  });
+
+  const text = await response.text();
+  let payload: MakersChatResponse | undefined;
+  try {
+    payload = text ? (JSON.parse(text) as MakersChatResponse) : undefined;
+  } catch {
+    payload = undefined;
+  }
+
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || text || `Makers Models request failed: HTTP ${response.status}`);
+  }
+
+  const answer = payload?.choices?.[0]?.message?.content || payload?.choices?.[0]?.delta?.content || "";
+  if (!answer.trim()) {
+    throw new Error("Makers Models returned an empty answer.");
+  }
+
+  return answer;
+}
+
+function extractAssistantText(message: unknown): string {
+  const content = (message as { message?: { content?: unknown[] } })?.message?.content;
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .map((block) => {
+      if (block && typeof block === "object" && "text" in block) {
+        const text = (block as { text?: unknown }).text;
+        return typeof text === "string" ? text : "";
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function maybeAppendMessage(
+  context: AgentContext,
+  role: "user" | "assistant",
+  content: string
+): Promise<void> {
+  const conversationId = context.conversation_id;
+  if (!conversationId || typeof context.store?.appendMessage !== "function") return;
+
+  try {
+    await context.store.appendMessage({ conversationId, role, content });
+  } catch {
+    // Local runs and early Makers previews should not fail only because history is unavailable.
+  }
+}
+
+async function runClaudeAgent(message: string, kb: KnowledgeBase, context: AgentContext): Promise<string> {
+  const sdk = await import("@anthropic-ai/claude-agent-sdk");
+  const env = context.env ?? process.env;
+  const prompt = buildClaudePrompt(message, kb);
+
+  const options: Record<string, unknown> = {
+    model: resolveModelName(env),
+    systemPrompt: SYSTEM_PROMPT,
+    cwd: process.cwd(),
+    maxTurns: 4,
+    permissionMode: "bypassPermissions",
+    settingSources: ["project"],
+    tools: [],
+    allowedTools: [],
+    env: collectGatewayEnv(env)
+  };
+
+  const sessionStore =
+    context.store?.claudeSessionStore?.() ?? context.store?.claude_session_store?.();
+  if (sessionStore) {
+    options.sessionStore = sessionStore;
+  }
+
+  const edgeoneMcp = context.tools?.toClaudeMcpServer?.();
+  if (edgeoneMcp && typeof sdk.createSdkMcpServer === "function") {
+    options.mcpServers = {
+      [edgeoneMcp.name]: sdk.createSdkMcpServer({
+        name: edgeoneMcp.name,
+        tools: edgeoneMcp.tools as Parameters<typeof sdk.createSdkMcpServer>[0]["tools"],
+        alwaysLoad: true
+      })
+    };
+    options.allowedTools = edgeoneMcp.allowedTools ?? [];
+  }
+
+  let assistantText = "";
+  let resultText = "";
+  const stream = sdk.query({ prompt, options });
+
+  for await (const msg of stream) {
+    const typed = msg as { type?: string; result?: unknown };
+    if (typed.type === "assistant") {
+      assistantText = extractAssistantText(msg) || assistantText;
+    }
+
+    if (typed.type === "result") {
+      resultText = typeof typed.result === "string" ? typed.result : "";
+      break;
+    }
+  }
+
+  return resultText || assistantText || "Claude Agent SDK 未返回文本结果。";
+}
+
+export async function onRequest(context: AgentContext): Promise<Response> {
+  if (context.request?.method === "OPTIONS") {
+    return jsonResponse({ ok: true });
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = await parseBody(context);
+  } catch (error) {
+    return jsonResponse({ ok: false, error: `Invalid JSON body: ${(error as Error).message}` }, 400);
+  }
+
+  const message =
+    typeof body.message === "string" && body.message.trim()
+      ? body.message.trim()
+      : DEFAULT_USER_MESSAGE;
+
+  let kb: KnowledgeBase;
+  try {
+    kb = await loadKnowledgeBase();
+  } catch (error) {
+    return jsonResponse({ ok: false, error: (error as Error).message }, 500);
+  }
+
+  await maybeAppendMessage(context, "user", message);
+
+  const forceLocal = body.local === true || body.useLocal === true;
+  const env = context.env ?? process.env;
+
+  if (!forceLocal && hasMakersCredentials(env)) {
+    try {
+      const answer = await runMakersModel(message, kb, env);
+      await maybeAppendMessage(context, "assistant", answer);
+      return jsonResponse({
+        ok: true,
+        route: "/topic",
+        mode: "makers-models",
+        model: resolveModelName(env),
+        answer,
+        dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
+      });
+    } catch (error) {
+      const fallback = makeLocalTopicPlan(message, kb);
+      return jsonResponse({
+        ok: true,
+        route: "/topic",
+        mode: "local-fallback",
+        warning: `Makers Models failed, returned deterministic local plan instead: ${(error as Error).message}`,
+        result: fallback
+      });
+    }
+  }
+
+  if (!forceLocal && hasAnthropicCredentials(env)) {
+    try {
+      const answer = await runClaudeAgent(message, kb, context);
+      await maybeAppendMessage(context, "assistant", answer);
+      return jsonResponse({
+        ok: true,
+        route: "/topic",
+        mode: "claude-agent-sdk",
+        model: resolveModelName(env),
+        answer,
+        dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
+      });
+    } catch (error) {
+      const fallback = makeLocalTopicPlan(message, kb);
+      return jsonResponse({
+        ok: true,
+        route: "/topic",
+        mode: "local-fallback",
+        warning: `Claude Agent SDK failed, returned deterministic local plan instead: ${(error as Error).message}`,
+        result: fallback
+      });
+    }
+  }
+
+  const result = makeLocalTopicPlan(message, kb);
+  await maybeAppendMessage(context, "assistant", JSON.stringify(result));
+
+  return jsonResponse({
+    ok: true,
+    route: "/topic",
+    mode: "local",
+    note: "未检测到 AI_GATEWAY_API_KEY 或 ANTHROPIC_API_KEY，因此使用本地确定性选题逻辑；部署到 Makers 并配置模型密钥后会走 Claude Agent SDK。",
+    result
+  });
+}
+
+export default onRequest;
