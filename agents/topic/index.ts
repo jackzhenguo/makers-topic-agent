@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -62,6 +62,13 @@ interface KnowledgeBase {
   hotUrls: HotUrl[];
   recentArticles: RecentArticle[];
 }
+
+const DATA_FILE_PATHS = {
+  account: "data/account.md",
+  rules: "data/rules.md",
+  hotUrls: "data/hot-urls.json",
+  recentArticles: "data/recent-articles.json"
+} as const;
 
 interface ConversationMessage {
   role?: string;
@@ -132,10 +139,10 @@ async function fetchJsonFromPublic<T>(baseUrl: string, relativePath: string, fal
 
 async function loadKnowledgeBase(context?: AgentContext): Promise<KnowledgeBase> {
   const [account, rules, hotUrls, recentArticles] = await Promise.all([
-    readText("data/account.md"),
-    readText("data/rules.md"),
-    readJson<HotUrl[]>("data/hot-urls.json", []),
-    readJson<RecentArticle[]>("data/recent-articles.json", [])
+    readText(DATA_FILE_PATHS.account),
+    readText(DATA_FILE_PATHS.rules),
+    readJson<HotUrl[]>(DATA_FILE_PATHS.hotUrls, []),
+    readJson<RecentArticle[]>(DATA_FILE_PATHS.recentArticles, [])
   ]);
 
   const fromFiles = { account, rules, hotUrls, recentArticles };
@@ -155,6 +162,29 @@ async function loadKnowledgeBase(context?: AgentContext): Promise<KnowledgeBase>
     hotUrls: publicHotUrls,
     recentArticles: publicRecentArticles
   };
+}
+
+async function prepareSandboxDataFiles(kb: KnowledgeBase): Promise<string> {
+  const workspaceRoot = process.cwd();
+  const dataDir = path.join(workspaceRoot, "data");
+
+  try {
+    await mkdir(dataDir, { recursive: true });
+    await Promise.all([
+      writeFile(path.join(workspaceRoot, DATA_FILE_PATHS.account), kb.account, "utf8"),
+      writeFile(path.join(workspaceRoot, DATA_FILE_PATHS.rules), kb.rules, "utf8"),
+      writeFile(path.join(workspaceRoot, DATA_FILE_PATHS.hotUrls), `${JSON.stringify(kb.hotUrls, null, 2)}\n`, "utf8"),
+      writeFile(
+        path.join(workspaceRoot, DATA_FILE_PATHS.recentArticles),
+        `${JSON.stringify(kb.recentArticles, null, 2)}\n`,
+        "utf8"
+      )
+    ]);
+  } catch {
+    // The Agent can still run from injected prompt data if the sandbox is read-only.
+  }
+
+  return workspaceRoot;
 }
 
 async function parseBody(context: AgentContext): Promise<Record<string, unknown>> {
@@ -445,11 +475,13 @@ async function runClaudeAgent(
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   const env = context.env ?? process.env;
   const prompt = buildClaudePrompt(message, kb, history);
+  const edgeoneMcp = context.tools?.toClaudeMcpServer?.();
+  const cwd = edgeoneMcp ? await prepareSandboxDataFiles(kb) : process.cwd();
 
   const options: Record<string, unknown> = {
     model: resolveModelName(env),
     systemPrompt: SYSTEM_PROMPT,
-    cwd: process.cwd(),
+    cwd,
     maxTurns: 4,
     permissionMode: "bypassPermissions",
     settingSources: ["project"],
@@ -467,7 +499,6 @@ async function runClaudeAgent(
     }
   }
 
-  const edgeoneMcp = context.tools?.toClaudeMcpServer?.();
   if (edgeoneMcp && typeof sdk.createSdkMcpServer === "function") {
     options.mcpServers = {
       [edgeoneMcp.name]: sdk.createSdkMcpServer({
