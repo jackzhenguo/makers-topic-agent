@@ -93,7 +93,7 @@ interface IntentResult {
   showResult: boolean;
   confidence: number;
   reason: string;
-  source: "model" | "default";
+  source: "model" | "default" | "ui";
   topicIndex?: number | null;
 }
 
@@ -642,13 +642,17 @@ function makeIntentUnavailableReply(message: string, intent: IntentResult) {
   };
 }
 
+function intentModelUnavailable(intent: IntentResult): boolean {
+  return intent.source === "default" && intent.reason.includes("intent model");
+}
+
 function makeLocalReplyForIntent(
   message: string,
   kb: KnowledgeBase,
   history: ConversationMessage[],
   intent: IntentResult
 ) {
-  if (intent.source === "default" && intent.reason.includes("intent model")) {
+  if (intentModelUnavailable(intent)) {
     return makeIntentUnavailableReply(message, intent);
   }
 
@@ -827,6 +831,19 @@ function defaultIntent(reason: string): IntentResult {
     confidence: 0,
     reason,
     source: "default",
+    topicIndex: null
+  };
+}
+
+function intentFromHint(value: unknown): IntentResult | undefined {
+  if (value !== "generate_topics") return undefined;
+
+  return {
+    type: "generate_topics",
+    showResult: true,
+    confidence: 1,
+    reason: "explicit UI request to generate topics",
+    source: "ui",
     topicIndex: null
   };
 }
@@ -1267,7 +1284,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     "classify_intent",
     { "agent.step": "classify_intent" },
     async (span) => {
-      const result = await classifyIntentWithModel(message, history, env);
+      const result = intentFromHint(body.intentHint) ?? await classifyIntentWithModel(message, history, env);
       span.setAttributes?.({
         "intent.type": result.type,
         "intent.show_result": result.showResult,
@@ -1285,10 +1302,11 @@ export async function onRequest(context: AgentContext): Promise<Response> {
   const needsTopicList = intent.type === "generate_topics" && intent.showResult;
   const needsSandboxTools = enableSandboxTools && needsTopicList;
   const modelStep = needsTopicList ? "generate_topics" : "answer_followup";
+  const modelUnavailable = intentModelUnavailable(intent);
   const shouldUseClaudeAgent =
-    !forceLocal && hasAnthropicCredentials(env) && (needsSandboxTools || !hasMakersCredentials(env));
+    !forceLocal && !modelUnavailable && hasAnthropicCredentials(env) && (needsSandboxTools || !hasMakersCredentials(env));
 
-  if (!forceLocal && hasMakersCredentials(env) && !shouldUseClaudeAgent) {
+  if (!forceLocal && !modelUnavailable && hasMakersCredentials(env) && !shouldUseClaudeAgent) {
     try {
       const answer = await withSpan(
         context,
