@@ -504,6 +504,96 @@ function makeLocalTopicPlan(message: string, kb: KnowledgeBase) {
   };
 }
 
+function parseStoredTopicPlan(content: string): { topics: Array<Record<string, unknown>>; recommended?: Record<string, unknown> } | undefined {
+  const candidates = [
+    content,
+    content.match(/```(?:json)?\s*([\s\S]*?)```/i)?.[1] || ""
+  ].filter(Boolean);
+
+  for (const candidate of candidates) {
+    const firstBrace = candidate.indexOf("{");
+    const lastBrace = candidate.lastIndexOf("}");
+    if (firstBrace < 0 || lastBrace <= firstBrace) continue;
+
+    try {
+      const parsed = JSON.parse(candidate.slice(firstBrace, lastBrace + 1)) as Record<string, unknown>;
+      const topics = parsed.topics || parsed.candidates;
+      if (Array.isArray(topics) && topics.length > 0) {
+        return {
+          topics: topics.filter((topic): topic is Record<string, unknown> => Boolean(topic && typeof topic === "object")),
+          recommended: parsed.recommended && typeof parsed.recommended === "object" ? (parsed.recommended as Record<string, unknown>) : undefined
+        };
+      }
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return undefined;
+}
+
+function lastTopicPlanFromHistory(history: ConversationMessage[]): { topics: Array<Record<string, unknown>>; recommended?: Record<string, unknown> } | undefined {
+  for (const item of [...history].reverse()) {
+    if (item.role !== "assistant") continue;
+    const plan = parseStoredTopicPlan(stringifyStoredContent(item.content));
+    if (plan?.topics.length) return plan;
+  }
+
+  return undefined;
+}
+
+function topicIndexFromMessage(message: string): number {
+  const match = message.match(/(?:Topic|话题|选题)\s*(\d+|[一二三四五六七八九十])/i);
+  if (!match) return 0;
+  const raw = match[1];
+  const chineseNumbers: Record<string, number> = {
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+    十: 10
+  };
+  const number = Number(raw) || chineseNumbers[raw] || 1;
+  return Math.max(number - 1, 0);
+}
+
+function topicText(topic: Record<string, unknown>, key: string): string {
+  const value = topic[key];
+  if (Array.isArray(value)) return value.map((item) => String(item)).filter(Boolean).join("；");
+  return typeof value === "string" ? value : "";
+}
+
+function makeLocalFollowupReply(message: string, kb: KnowledgeBase, history: ConversationMessage[]) {
+  const plan = lastTopicPlanFromHistory(history);
+  const fallbackPlan = makeLocalTopicPlan(message, kb);
+  const topics = plan?.topics.length ? plan.topics : fallbackPlan.candidates;
+  const topic = topics[topicIndexFromMessage(message)] || topics[0];
+  const title = topicText(topic, "title") || topicText(topic, "event") || "上一轮选题";
+  const angle = topicText(topic, "angle") || topicText(topic, "whyNow") || topicText(topic, "summary");
+  const outline = topicText(topic, "outline")
+    .split(/[；;]\s*/)
+    .filter(Boolean)
+    .slice(0, 5);
+  const outlineText = outline.length
+    ? outline.map((item, index) => `${index + 1}. ${item}`).join(" ")
+    : "1. 开场判断：先说明这个热点为什么值得写。 2. 背景压缩：把官方更新翻译成读者能懂的话。 3. 实操路径：给出普通人马上能验证的步骤。 4. 坑点提醒：标注限制、成本和适用边界。 5. 行动建议：告诉读者今天该怎么试。";
+
+  return {
+    request: message,
+    reply: `模型调用暂时失败，我先基于上一轮上下文做本地展开。标题：${title}。切入角度：${angle || "围绕真实使用场景展开，避免只复述新闻。"} 文章结构：${outlineText}`,
+    recommended: {
+      title,
+      angle,
+      outline
+    }
+  };
+}
+
 function stringifyStoredContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -914,9 +1004,11 @@ export async function onRequest(context: AgentContext): Promise<Response> {
 
   const forceLocal = body.local === true || body.useLocal === true;
   const enableSandboxTools = body.sandboxTools !== false;
+  const needsTopicList = wantsTopicList(message);
+  const needsSandboxTools = enableSandboxTools && needsTopicList;
   const env = context.env ?? process.env;
   const shouldUseClaudeAgent =
-    !forceLocal && hasAnthropicCredentials(env) && (enableSandboxTools || !hasMakersCredentials(env));
+    !forceLocal && hasAnthropicCredentials(env) && (needsSandboxTools || !hasMakersCredentials(env));
 
   if (!forceLocal && hasMakersCredentials(env) && !shouldUseClaudeAgent) {
     try {
@@ -949,14 +1041,14 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         context,
         "generate_local_fallback",
         { "agent.step": "generate_local_fallback", "agent.runtime": "local" },
-        async () => makeLocalTopicPlan(message, kb)
+        async () => (needsTopicList ? makeLocalTopicPlan(message, kb) : makeLocalFollowupReply(message, kb, history))
       );
       return jsonResponse({
         ok: true,
         route: "/topic",
         mode: "local-fallback",
         memory: memoryInfo(context, history),
-        warning: `Makers Models failed, returned deterministic local plan instead: ${(error as Error).message}`,
+        warning: `Makers Models failed, returned deterministic local ${needsTopicList ? "plan" : "follow-up"} instead: ${(error as Error).message}`,
         result: fallback
       });
     }
@@ -968,7 +1060,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         context,
         "generate_topics",
         { "agent.step": "generate_topics", "agent.runtime": "claude-agent-sdk" },
-        async () => runClaudeAgent(message, kb, context, history, enableSandboxTools)
+        async () => runClaudeAgent(message, kb, context, history, needsSandboxTools)
       );
       await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
         await maybeAppendMessage(context, "assistant", answer);
@@ -981,7 +1073,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
             mode: "claude-agent-sdk",
             model: resolveClaudeAgentModel(env),
             providerModel: resolveModelName(env),
-            sandboxTools: enableSandboxTools,
+            sandboxTools: needsSandboxTools,
             memory: memoryInfo(context, history),
             dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
           },
@@ -995,14 +1087,14 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         context,
         "generate_local_fallback",
         { "agent.step": "generate_local_fallback", "agent.runtime": "local" },
-        async () => makeLocalTopicPlan(message, kb)
+        async () => (needsTopicList ? makeLocalTopicPlan(message, kb) : makeLocalFollowupReply(message, kb, history))
       );
       return jsonResponse({
         ok: true,
         route: "/topic",
         mode: "local-fallback",
         memory: memoryInfo(context, history),
-        warning: `Claude Agent SDK failed, returned deterministic local plan instead: ${(error as Error).message}`,
+        warning: `Claude Agent SDK failed, returned deterministic local ${needsTopicList ? "plan" : "follow-up"} instead: ${(error as Error).message}`,
         result: fallback
       });
     }
@@ -1010,9 +1102,9 @@ export async function onRequest(context: AgentContext): Promise<Response> {
 
   const result = await withSpan(
     context,
-    "generate_local_topics",
-    { "agent.step": "generate_local_topics", "agent.runtime": "local" },
-    async () => makeLocalTopicPlan(message, kb)
+    needsTopicList ? "generate_local_topics" : "generate_local_followup",
+    { "agent.step": needsTopicList ? "generate_local_topics" : "generate_local_followup", "agent.runtime": "local" },
+    async () => (needsTopicList ? makeLocalTopicPlan(message, kb) : makeLocalFollowupReply(message, kb, history))
   );
   await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
     await maybeAppendMessage(context, "assistant", JSON.stringify(result));
