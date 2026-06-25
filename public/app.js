@@ -6,6 +6,7 @@ const state = {
   hotExpanded: false,
   topicsExpanded: false,
   expandedTopics: new Set(),
+  expandedMessages: new Set(),
   mode: "model",
   lastRaw: null,
   parsed: null
@@ -550,21 +551,40 @@ function assistantChatMessage(parsed, raw) {
 
 function renderChatThread() {
   els.chatThread.innerHTML = state.messages
-    .map((message) => {
+    .map((message, index) => {
+      const messageId = message.id || `${message.role}-${index}`;
       const roleLabel = message.role === "user" ? "You" : `Agent${message.mode ? ` · ${message.mode}` : ""}`;
       const topics = Array.isArray(message.topics) ? message.topics : [];
+      const fullContent = cleanDisplayText(message.content || "");
+      const collapsedLength = message.role === "user" ? 300 : 260;
+      const canExpand = fullContent.length > collapsedLength;
+      const expanded = state.expandedMessages.has(messageId);
+      const visibleContent = canExpand && !expanded ? `${fullContent.slice(0, collapsedLength)}...` : fullContent;
       return `
         <div class="chat-message ${message.role === "user" ? "user" : "assistant"}">
           <div class="chat-role">${escapeHtml(roleLabel)}</div>
-          <div class="chat-bubble">
+          <div class="chat-bubble ${expanded ? "expanded" : ""}">
             ${message.title ? `<h4>${escapeHtml(shortDisplayText(message.title, 82))}</h4>` : ""}
-            <div>${escapeHtml(shortDisplayText(message.content || "", message.role === "user" ? 300 : 240))}</div>
+            <div class="chat-text">${escapeHtml(visibleContent)}</div>
             ${topics.length ? `<ul>${topics.map((topic) => `<li>${escapeHtml(shortDisplayText(topic, 88))}</li>`).join("")}</ul>` : ""}
+            ${canExpand ? `<button class="chat-expand-button" type="button" data-expand-message="${escapeHtml(messageId)}">${expanded ? "收起" : "展开全文"}</button>` : ""}
           </div>
         </div>
       `;
     })
     .join("");
+  els.chatThread.querySelectorAll("[data-expand-message]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const messageId = button.getAttribute("data-expand-message");
+      if (!messageId) return;
+      if (state.expandedMessages.has(messageId)) {
+        state.expandedMessages.delete(messageId);
+      } else {
+        state.expandedMessages.add(messageId);
+      }
+      renderChatThread();
+    });
+  });
   els.chatThread.scrollTop = els.chatThread.scrollHeight;
 }
 

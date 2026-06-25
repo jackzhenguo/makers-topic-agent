@@ -422,11 +422,16 @@ textarea:focus-visible {
   line-height: 1.4;
 }
 
-.chat-bubble > div {
+.chat-bubble > .chat-text {
   display: -webkit-box;
   overflow: hidden;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 4;
+}
+
+.chat-bubble.expanded > .chat-text {
+  display: block;
+  overflow: visible;
 }
 
 .chat-bubble ul {
@@ -436,6 +441,23 @@ textarea:focus-visible {
 
 .chat-bubble li + li {
   margin-top: 4px;
+}
+
+.chat-expand-button {
+  margin-top: 10px;
+  border: 1px solid rgba(128, 217, 210, 0.22);
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: rgba(128, 217, 210, 0.08);
+  color: #c9f8f3;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.chat-expand-button:hover {
+  border-color: rgba(128, 217, 210, 0.48);
+  background: rgba(128, 217, 210, 0.14);
 }
 
 .composer {
