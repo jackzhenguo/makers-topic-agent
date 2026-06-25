@@ -129,12 +129,15 @@ const SANDBOX_FILE_TOOL_HINTS = [
   "files_list",
   "files_read"
 ];
+const FALLBACK_SANDBOX_FILE_TOOLS = ["mcp__edgeone__files_list", "mcp__edgeone__files_read"];
 const SANDBOX_FILE_READ_INSTRUCTIONS = [
   "Makers 沙箱素材读取要求：",
-  "在生成选题前，必须通过 Makers 文件工具读取项目素材，这是本次真实生成链路的一部分。",
-  "先调用文件列表工具列出 data 目录，再调用文件读取工具读取 data/account.md、data/rules.md、data/recent-articles.json 和 data/hot-urls.json。",
-  "所有 path 参数都必须是相对路径，只能使用 data、data/account.md、data/rules.md、data/recent-articles.json、data/hot-urls.json。",
-  "禁止使用 /workspace、/、..、绝对路径、环境变量、密钥路径或 shell 命令。",
+  "在生成选题前，优先通过 Makers 文件工具读取项目素材，这是本次真实生成链路的一部分。",
+  "先调用文件列表工具列出当前目录，path 必须等于 \".\"。",
+  "如果列表中包含 data 目录，再调用文件列表工具列出 data，并调用文件读取工具读取 data/account.md、data/rules.md、data/recent-articles.json 和 data/hot-urls.json。",
+  "所有 path 参数都必须是相对路径，只能使用 .、data、data/account.md、data/rules.md、data/recent-articles.json、data/hot-urls.json。",
+  "禁止使用 /workspace、/home/user、/、..、绝对路径、环境变量、密钥路径或 shell 命令；也不要调用 commands 工具。",
+  "如果文件工具没有列出 data 目录，不要继续尝试读取缺失路径，直接使用 prompt 中已经注入的素材生成结果，且不要在最终回答里提到文件工具失败。",
   "读取后再结合这些素材、历史消息和今日热点生成选题。不要输出文件全文。"
 ].join("\n");
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -365,26 +368,31 @@ async function loadKnowledgeBase(context?: AgentContext): Promise<KnowledgeBase>
 }
 
 async function prepareSandboxDataFiles(kb: KnowledgeBase): Promise<string> {
-  const workspaceRoot = process.cwd();
-  const dataDir = path.join(workspaceRoot, "data");
+  const candidates = process.platform === "win32" ? [process.cwd()] : ["/home/user", process.cwd(), "/workspace"];
+  let firstWritableRoot = process.cwd();
 
-  try {
-    await mkdir(dataDir, { recursive: true });
-    await Promise.all([
-      writeFile(path.join(workspaceRoot, DATA_FILE_PATHS.account), kb.account, "utf8"),
-      writeFile(path.join(workspaceRoot, DATA_FILE_PATHS.rules), kb.rules, "utf8"),
-      writeFile(path.join(workspaceRoot, DATA_FILE_PATHS.hotUrls), `${JSON.stringify(kb.hotUrls, null, 2)}\n`, "utf8"),
-      writeFile(
-        path.join(workspaceRoot, DATA_FILE_PATHS.recentArticles),
-        `${JSON.stringify(kb.recentArticles, null, 2)}\n`,
-        "utf8"
-      )
-    ]);
-  } catch {
-    // The Agent can still run from injected prompt data if the sandbox is read-only.
+  for (const workspaceRoot of Array.from(new Set(candidates))) {
+    try {
+      const dataDir = path.join(workspaceRoot, "data");
+      await mkdir(dataDir, { recursive: true });
+      await Promise.all([
+        writeFile(path.join(workspaceRoot, DATA_FILE_PATHS.account), kb.account, "utf8"),
+        writeFile(path.join(workspaceRoot, DATA_FILE_PATHS.rules), kb.rules, "utf8"),
+        writeFile(path.join(workspaceRoot, DATA_FILE_PATHS.hotUrls), `${JSON.stringify(kb.hotUrls, null, 2)}\n`, "utf8"),
+        writeFile(
+          path.join(workspaceRoot, DATA_FILE_PATHS.recentArticles),
+          `${JSON.stringify(kb.recentArticles, null, 2)}\n`,
+          "utf8"
+        )
+      ]);
+      firstWritableRoot = workspaceRoot;
+      break;
+    } catch {
+      // The Agent can still run from injected prompt data if a candidate root is read-only.
+    }
   }
 
-  return workspaceRoot;
+  return firstWritableRoot;
 }
 
 async function parseBody(context: AgentContext): Promise<Record<string, unknown>> {
@@ -603,11 +611,22 @@ function buildClaudePrompt(
 function filterAllowedTools(allowedTools: string[] = [], hints: string[] = []): string[] {
   if (!hints.length) return allowedTools;
 
-  const matched = allowedTools.filter((tool) =>
+  return allowedTools.filter((tool) =>
     hints.some((hint) => tool === hint || tool.endsWith(hint) || tool.includes(hint))
   );
+}
 
-  return matched.length ? matched : allowedTools;
+function hasMcpTools(tools: unknown): boolean {
+  if (Array.isArray(tools)) return tools.length > 0;
+  if (tools && typeof tools === "object") return Object.keys(tools).length > 0;
+  return Boolean(tools);
+}
+
+function resolveAllowedFileTools(edgeoneMcp?: { tools: unknown; allowedTools?: string[] }): string[] {
+  if (!edgeoneMcp || !hasMcpTools(edgeoneMcp.tools)) return [];
+
+  const matched = filterAllowedTools(edgeoneMcp.allowedTools ?? [], SANDBOX_FILE_TOOL_HINTS);
+  return matched.length ? matched : FALLBACK_SANDBOX_FILE_TOOLS;
 }
 
 interface MakersChatResponse {
@@ -715,7 +734,7 @@ async function runClaudeAgent(
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   const env = context.env ?? process.env;
   const candidateMcp = enableSandboxTools ? context.tools?.toClaudeMcpServer?.() : undefined;
-  const allowedFileTools = filterAllowedTools(candidateMcp?.allowedTools ?? [], SANDBOX_FILE_TOOL_HINTS);
+  const allowedFileTools = resolveAllowedFileTools(candidateMcp);
   const edgeoneMcp = candidateMcp && allowedFileTools.length > 0 ? candidateMcp : undefined;
   const prompt = buildClaudePrompt(message, kb, history, Boolean(edgeoneMcp));
   const cwd = edgeoneMcp ? await prepareSandboxDataFiles(kb) : process.cwd();

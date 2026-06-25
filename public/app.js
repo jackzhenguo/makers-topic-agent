@@ -10,9 +10,9 @@ const state = {
   lastRaw: null,
   parsed: null
 };
-const conversationKey = "makers-topic-agent.conversation-id";
+const conversationKey = "makers-topic-agent.conversation-id.v2";
 const historyKey = "makers-topic-agent.history";
-const messagesKey = "makers-topic-agent.messages";
+const messagesKey = "makers-topic-agent.messages.v2";
 const conversationIdPattern = /^[0-9A-Za-z_.-]{6,36}$/;
 const topicPreviewCount = 2;
 const defaultPrompt = "结合最近三篇文章和今日 AI 热点，生成 5 个适合公众号的高点击选题，避免和最近文章重复。";
