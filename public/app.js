@@ -17,7 +17,6 @@ const messagesKey = "makers-topic-agent.messages.v2";
 const conversationIdPattern = /^[0-9A-Za-z_.-]{6,36}$/;
 const topicPreviewCount = 2;
 const defaultPrompt = "结合最近三篇文章和今日 AI 热点，生成 5 个适合公众号的高点击选题，避免和最近文章重复。";
-const localHostnames = new Set(["localhost", "127.0.0.1", "::1"]);
 
 const els = {
   modeLabel: document.querySelector("#modeLabel"),
@@ -770,7 +769,7 @@ els.copyJsonBtn.addEventListener("click", () => copyText(JSON.stringify(state.la
 els.copyPreviewBtn.addEventListener("click", () => copyText(previewText()));
 els.downloadBtn.addEventListener("click", downloadResult);
 
-setMode(localHostnames.has(window.location.hostname) ? "local" : "model");
+setMode("model");
 initIcons();
 loadHistory();
 loadChatMessages();
