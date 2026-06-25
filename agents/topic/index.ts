@@ -41,6 +41,14 @@ interface AgentContext {
       allowedTools?: string[];
     };
   };
+  tracer?: {
+    span?: <T>(
+      name: string,
+      fn: (span: TraceSpan) => Promise<T> | T,
+      attrs?: Record<string, string | number | boolean>
+    ) => Promise<T>;
+    setAttributes?: (attrs: Record<string, string | number | boolean>) => void;
+  };
 }
 
 interface HotUrl {
@@ -48,6 +56,8 @@ interface HotUrl {
   url: string;
   note?: string;
   tags?: string[];
+  date?: string;
+  source?: string;
 }
 
 interface RecentArticle {
@@ -75,6 +85,35 @@ interface ConversationMessage {
   role?: string;
   content?: unknown;
 }
+
+interface TraceSpan {
+  setAttributes?: (attrs: Record<string, string | number | boolean>) => void;
+}
+
+interface DailyNewsArticle {
+  headline?: string;
+  name?: string;
+  description?: string;
+  articleSection?: string;
+  datePublished?: string;
+  url?: string;
+  sameAs?: string[];
+}
+
+interface DailyNewsItem {
+  item?: DailyNewsArticle;
+}
+
+interface DailyNewsCollection {
+  "@type"?: string;
+  mainEntity?: {
+    itemListElement?: DailyNewsItem[];
+  };
+}
+
+const DAILY_HOT_SOURCE_URL = "https://zglg.work/ai/today";
+const DAILY_HOT_CACHE_MS = 10 * 60 * 1000;
+let dailyHotCache: { expiresAt: number; items: HotUrl[] } | undefined;
 
 const SYSTEM_PROMPT = [
   "你是 makers-topic-agent，一个服务于公众号/视频号内容生产的选题 Agent。",
@@ -113,6 +152,91 @@ async function readJson<T>(relativePath: string, fallback: T): Promise<T> {
   }
 }
 
+async function withSpan<T>(
+  context: AgentContext | undefined,
+  name: string,
+  attrs: Record<string, string | number | boolean>,
+  fn: (span: TraceSpan) => Promise<T> | T
+): Promise<T> {
+  if (typeof context?.tracer?.span === "function") {
+    return context.tracer.span(name, fn, attrs);
+  }
+
+  return fn({ setAttributes() {} });
+}
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'");
+}
+
+function parseDailyHotUrls(html: string): HotUrl[] {
+  const jsonLdBlocks = Array.from(
+    html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)
+  ).map((match) => decodeHtml(match[1] || "").trim());
+
+  for (const block of jsonLdBlocks) {
+    try {
+      const parsed = JSON.parse(block) as DailyNewsCollection | DailyNewsCollection[];
+      const collections = Array.isArray(parsed) ? parsed : [parsed];
+      const collection = collections.find((item) => item?.["@type"] === "CollectionPage" && item.mainEntity);
+      const articles = collection?.mainEntity?.itemListElement || [];
+      const items: HotUrl[] = articles
+        .map((entry): HotUrl | undefined => {
+          const article = entry.item;
+          const title = article?.headline || article?.name;
+          const description = article?.description || "";
+          if (!title || !description) return undefined;
+
+          const sourceUrl = article.sameAs?.[0] || article.url || DAILY_HOT_SOURCE_URL;
+          return {
+            title,
+            url: sourceUrl,
+            note: `来自 zglg.work 今日AI快讯 ${article.datePublished || ""}。${description}`,
+            tags: [article.articleSection, article.datePublished, "zglg.work"].filter(Boolean) as string[],
+            date: article.datePublished,
+            source: DAILY_HOT_SOURCE_URL
+          };
+        })
+        .filter((item): item is HotUrl => item !== undefined);
+
+      if (items.length > 0) return items.slice(0, 12);
+    } catch {
+      // Try the next JSON-LD block.
+    }
+  }
+
+  return [];
+}
+
+async function fetchTodayHotUrls(): Promise<HotUrl[]> {
+  if (dailyHotCache && dailyHotCache.expiresAt > Date.now()) return dailyHotCache.items;
+
+  const response = await fetch(DAILY_HOT_SOURCE_URL, {
+    headers: {
+      "User-Agent": "makers-topic-agent/0.1 (+https://github.com/jackzhenguo/makers-topic-agent)"
+    }
+  });
+  if (!response.ok) {
+    throw new Error(`zglg.work returned HTTP ${response.status}`);
+  }
+
+  const html = await response.text();
+  const items = parseDailyHotUrls(html);
+  if (items.length === 0) {
+    throw new Error("No daily AI hot items found in zglg.work page.");
+  }
+
+  dailyHotCache = { expiresAt: Date.now() + DAILY_HOT_CACHE_MS, items };
+  return items;
+}
+
 function hasKnowledge(kb: KnowledgeBase): boolean {
   return Boolean(kb.account.trim() || kb.rules.trim() || kb.hotUrls.length || kb.recentArticles.length);
 }
@@ -139,30 +263,91 @@ async function fetchJsonFromPublic<T>(baseUrl: string, relativePath: string, fal
 }
 
 async function loadKnowledgeBase(context?: AgentContext): Promise<KnowledgeBase> {
-  const [account, rules, hotUrls, recentArticles] = await Promise.all([
-    readText(DATA_FILE_PATHS.account),
-    readText(DATA_FILE_PATHS.rules),
-    readJson<HotUrl[]>(DATA_FILE_PATHS.hotUrls, []),
-    readJson<RecentArticle[]>(DATA_FILE_PATHS.recentArticles, [])
-  ]);
+  return withSpan(context, "load_materials", { "agent.step": "load_materials" }, async (span) => {
+    const [account, rules, staticHotUrls, recentArticles] = await withSpan(
+      context,
+      "read_project_materials",
+      { "agent.step": "read_project_materials" },
+      async (readSpan) => {
+        const materials = await Promise.all([
+          readText(DATA_FILE_PATHS.account),
+          readText(DATA_FILE_PATHS.rules),
+          readJson<HotUrl[]>(DATA_FILE_PATHS.hotUrls, []),
+          readJson<RecentArticle[]>(DATA_FILE_PATHS.recentArticles, [])
+        ]);
+        readSpan.setAttributes?.({
+          "materials.static_hot_count": materials[2].length,
+          "materials.article_count": materials[3].length
+        });
+        return materials;
+      }
+    );
 
-  const fromFiles = { account, rules, hotUrls, recentArticles };
-  if (hasKnowledge(fromFiles) || !context?.request?.url) return fromFiles;
+    let publicFallback: Partial<KnowledgeBase> = {};
+    if (!hasKnowledge({ account, rules, hotUrls: staticHotUrls, recentArticles }) && context?.request?.url) {
+      publicFallback = await withSpan(
+        context,
+        "read_static_public_fallback",
+        { "agent.step": "read_static_public_fallback" },
+        async () => {
+          const publicBaseUrl = new URL(context.request?.url || "").origin;
+          const [publicAccount, publicRules, publicHotUrls, publicRecentArticles] = await Promise.all([
+            fetchTextFromPublic(publicBaseUrl, "/data/account.md"),
+            fetchTextFromPublic(publicBaseUrl, "/data/rules.md"),
+            fetchJsonFromPublic<HotUrl[]>(publicBaseUrl, "/data/hot-urls.json", []),
+            fetchJsonFromPublic<RecentArticle[]>(publicBaseUrl, "/data/recent-articles.json", [])
+          ]);
+          return {
+            account: publicAccount,
+            rules: publicRules,
+            hotUrls: publicHotUrls,
+            recentArticles: publicRecentArticles
+          };
+        }
+      );
+    }
 
-  const publicBaseUrl = new URL(context.request.url).origin;
-  const [publicAccount, publicRules, publicHotUrls, publicRecentArticles] = await Promise.all([
-    fetchTextFromPublic(publicBaseUrl, "/data/account.md"),
-    fetchTextFromPublic(publicBaseUrl, "/data/rules.md"),
-    fetchJsonFromPublic<HotUrl[]>(publicBaseUrl, "/data/hot-urls.json", []),
-    fetchJsonFromPublic<RecentArticle[]>(publicBaseUrl, "/data/recent-articles.json", [])
-  ]);
+    const fallbackHotUrls = publicFallback.hotUrls?.length ? publicFallback.hotUrls : staticHotUrls;
+    let dynamicHotUrls = fallbackHotUrls;
+    let hotSource = fallbackHotUrls.length ? "static-fallback" : "empty";
 
-  return {
-    account: publicAccount,
-    rules: publicRules,
-    hotUrls: publicHotUrls,
-    recentArticles: publicRecentArticles
-  };
+    try {
+      dynamicHotUrls = await withSpan(
+        context,
+        "fetch_today_hotspots",
+        { "agent.step": "fetch_today_hotspots", "source.url": DAILY_HOT_SOURCE_URL },
+        async (hotSpan) => {
+          const items = await fetchTodayHotUrls();
+          hotSpan.setAttributes?.({
+            "hotspots.count": items.length,
+            "hotspots.source": "zglg.work"
+          });
+          return items;
+        }
+      );
+      hotSource = "zglg.work";
+    } catch (error) {
+      span.setAttributes?.({
+        "hotspots.fallback": true,
+        "hotspots.error": (error as Error).message.slice(0, 180)
+      });
+    }
+
+    const kb = {
+      account: account || publicFallback.account || "",
+      rules: rules || publicFallback.rules || "",
+      hotUrls: dynamicHotUrls,
+      recentArticles: recentArticles.length ? recentArticles : publicFallback.recentArticles || []
+    };
+
+    span.setAttributes?.({
+      "materials.hot_count": kb.hotUrls.length,
+      "materials.article_count": kb.recentArticles.length,
+      "materials.hot_source": hotSource
+    });
+
+    return kb;
+  });
 }
 
 async function prepareSandboxDataFiles(kb: KnowledgeBase): Promise<string> {
@@ -345,6 +530,27 @@ function memoryInfo(context: AgentContext, history: ConversationMessage[]): Reco
     claudeSessionStore: typeof context.store?.claudeSessionStore === "function",
     loadedHistoryMessages: history.length
   };
+}
+
+async function analyzeAccountStyle(context: AgentContext, kb: KnowledgeBase): Promise<void> {
+  await withSpan(context, "analyze_account_style", { "agent.step": "analyze_account_style" }, async (span) => {
+    span.setAttributes?.({
+      "account.has_profile": Boolean(kb.account.trim()),
+      "rules.has_rules": Boolean(kb.rules.trim()),
+      "articles.count": kb.recentArticles.length
+    });
+  });
+}
+
+async function scoreHotspots(context: AgentContext, kb: KnowledgeBase): Promise<void> {
+  await withSpan(context, "score_hotspots", { "agent.step": "score_hotspots" }, async (span) => {
+    const highSignalCount = kb.hotUrls.filter((item) => item.tags?.some((tag) => /高|Agent|大模型/i.test(tag))).length;
+    span.setAttributes?.({
+      "hotspots.count": kb.hotUrls.length,
+      "hotspots.high_signal_count": highSignalCount,
+      "hotspots.dynamic_source": kb.hotUrls.some((item) => item.source === DAILY_HOT_SOURCE_URL)
+    });
+  });
 }
 
 function buildClaudePrompt(message: string, kb: KnowledgeBase, history: ConversationMessage[] = []): string {
@@ -543,6 +749,21 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     return jsonResponse({ ok: false, error: `Invalid JSON body: ${(error as Error).message}` }, 400);
   }
 
+  if (body.action === "materials" || context.request?.method === "GET") {
+    try {
+      const materials = await loadKnowledgeBase(context);
+      return jsonResponse({
+        ok: true,
+        route: "/topic",
+        action: "materials",
+        sourceUrl: DAILY_HOT_SOURCE_URL,
+        materials
+      });
+    } catch (error) {
+      return jsonResponse({ ok: false, error: (error as Error).message }, 500);
+    }
+  }
+
   const message =
     typeof body.message === "string" && body.message.trim()
       ? body.message.trim()
@@ -555,8 +776,21 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     return jsonResponse({ ok: false, error: (error as Error).message }, 500);
   }
 
-  const history = await loadConversationHistory(context);
-  await maybeAppendMessage(context, "user", message);
+  const history = await withSpan(
+    context,
+    "load_conversation_memory",
+    { "agent.step": "load_conversation_memory" },
+    async (span) => {
+      const messages = await loadConversationHistory(context);
+      span.setAttributes?.({ "memory.loaded_messages": messages.length });
+      return messages;
+    }
+  );
+  await withSpan(context, "persist_user_message", { "agent.step": "persist_user_message" }, async () => {
+    await maybeAppendMessage(context, "user", message);
+  });
+  await analyzeAccountStyle(context, kb);
+  await scoreHotspots(context, kb);
 
   const forceLocal = body.local === true || body.useLocal === true;
   const enableSandboxTools = body.sandboxTools === true;
@@ -564,8 +798,15 @@ export async function onRequest(context: AgentContext): Promise<Response> {
 
   if (!forceLocal && hasMakersCredentials(env)) {
     try {
-      const answer = await runMakersModel(message, kb, env, history);
-      await maybeAppendMessage(context, "assistant", answer);
+      const answer = await withSpan(
+        context,
+        "generate_topics",
+        { "agent.step": "generate_topics", "agent.runtime": "makers-models" },
+        async () => runMakersModel(message, kb, env, history)
+      );
+      await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
+        await maybeAppendMessage(context, "assistant", answer);
+      });
       return jsonResponse({
         ok: true,
         route: "/topic",
@@ -576,7 +817,12 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
       });
     } catch (error) {
-      const fallback = makeLocalTopicPlan(message, kb);
+      const fallback = await withSpan(
+        context,
+        "generate_local_fallback",
+        { "agent.step": "generate_local_fallback", "agent.runtime": "local" },
+        async () => makeLocalTopicPlan(message, kb)
+      );
       return jsonResponse({
         ok: true,
         route: "/topic",
@@ -590,8 +836,15 @@ export async function onRequest(context: AgentContext): Promise<Response> {
 
   if (!forceLocal && hasAnthropicCredentials(env)) {
     try {
-      const answer = await runClaudeAgent(message, kb, context, history, enableSandboxTools);
-      await maybeAppendMessage(context, "assistant", answer);
+      const answer = await withSpan(
+        context,
+        "generate_topics",
+        { "agent.step": "generate_topics", "agent.runtime": "claude-agent-sdk" },
+        async () => runClaudeAgent(message, kb, context, history, enableSandboxTools)
+      );
+      await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
+        await maybeAppendMessage(context, "assistant", answer);
+      });
       return jsonResponse({
         ok: true,
         route: "/topic",
@@ -604,7 +857,12 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
       });
     } catch (error) {
-      const fallback = makeLocalTopicPlan(message, kb);
+      const fallback = await withSpan(
+        context,
+        "generate_local_fallback",
+        { "agent.step": "generate_local_fallback", "agent.runtime": "local" },
+        async () => makeLocalTopicPlan(message, kb)
+      );
       return jsonResponse({
         ok: true,
         route: "/topic",
@@ -616,8 +874,15 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     }
   }
 
-  const result = makeLocalTopicPlan(message, kb);
-  await maybeAppendMessage(context, "assistant", JSON.stringify(result));
+  const result = await withSpan(
+    context,
+    "generate_local_topics",
+    { "agent.step": "generate_local_topics", "agent.runtime": "local" },
+    async () => makeLocalTopicPlan(message, kb)
+  );
+  await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
+    await maybeAppendMessage(context, "assistant", JSON.stringify(result));
+  });
 
   return jsonResponse({
     ok: true,

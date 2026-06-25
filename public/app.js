@@ -1,5 +1,6 @@
 const state = {
   materials: null,
+  materialsSource: "",
   mode: "model",
   lastRaw: null,
   parsed: null
@@ -126,9 +127,32 @@ function normalizeResponse(raw) {
 
 async function loadMaterials() {
   els.materialLabel.textContent = "读取素材中";
+  try {
+    const agentRes = await fetch("/topic", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Makers-Conversation-Id": getConversationId()
+      },
+      body: JSON.stringify({ action: "materials" })
+    });
+    if (agentRes.ok) {
+      const payload = await agentRes.json();
+      if (payload?.ok && payload.materials) {
+        state.materials = payload.materials;
+        state.materialsSource = payload.sourceUrl || "Agent";
+        renderMaterials();
+        return;
+      }
+    }
+  } catch {
+    // Fall back to local/static material loading below.
+  }
+
   const res = await fetch("/api/materials");
   if (res.ok) {
     state.materials = await res.json();
+    state.materialsSource = "Local";
   } else {
     const [account, rules, hotUrls, recentArticles] = await Promise.all([
       fetch("/data/account.md").then((r) => r.text()),
@@ -137,6 +161,7 @@ async function loadMaterials() {
       fetch("/data/recent-articles.json").then((r) => r.json())
     ]);
     state.materials = { account, rules, hotUrls, recentArticles };
+    state.materialsSource = "Static";
   }
   renderMaterials();
 }
@@ -146,7 +171,7 @@ function renderMaterials() {
   const articles = state.materials?.recentArticles || [];
   els.hotCount.textContent = hotUrls.length;
   els.articleCount.textContent = articles.length;
-  els.materialLabel.textContent = `${hotUrls.length} 热点 · ${articles.length} 文章`;
+  els.materialLabel.textContent = `${hotUrls.length} 热点 · ${articles.length} 文章 · ${state.materialsSource || "素材库"}`;
   els.hotList.innerHTML = "";
   els.articleList.innerHTML = "";
 
