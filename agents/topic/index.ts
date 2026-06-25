@@ -25,6 +25,11 @@ interface AgentContext {
   conversation_id?: string;
   store?: {
     appendMessage?: (message: Record<string, unknown>) => Promise<void>;
+    getMessages?: (query: {
+      conversationId: string;
+      limit?: number;
+      order?: "asc" | "desc";
+    }) => Promise<ConversationMessage[]>;
     claudeSessionStore?: () => unknown;
     claude_session_store?: () => unknown;
   };
@@ -56,6 +61,11 @@ interface KnowledgeBase {
   rules: string;
   hotUrls: HotUrl[];
   recentArticles: RecentArticle[];
+}
+
+interface ConversationMessage {
+  role?: string;
+  content?: unknown;
 }
 
 const SYSTEM_PROMPT = [
@@ -255,9 +265,65 @@ function makeLocalTopicPlan(message: string, kb: KnowledgeBase) {
   };
 }
 
-function buildClaudePrompt(message: string, kb: KnowledgeBase): string {
+function stringifyStoredContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content.map((item) => stringifyStoredContent(item)).filter(Boolean).join("\n");
+  }
+  if (content && typeof content === "object") {
+    const maybeText = (content as { text?: unknown; content?: unknown }).text ?? (content as { content?: unknown }).content;
+    if (typeof maybeText === "string") return maybeText;
+    try {
+      return JSON.stringify(content);
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+function formatConversationHistory(messages: ConversationMessage[]): string {
+  return messages
+    .slice(-8)
+    .map((item) => {
+      const role = item.role || "unknown";
+      const content = stringifyStoredContent(item.content).replace(/\s+/g, " ").trim();
+      return content ? `${role}: ${content.slice(0, 1200)}` : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
+async function loadConversationHistory(context: AgentContext): Promise<ConversationMessage[]> {
+  const conversationId = context.conversation_id;
+  if (!conversationId || typeof context.store?.getMessages !== "function") return [];
+
+  try {
+    return await context.store.getMessages({ conversationId, limit: 12, order: "asc" });
+  } catch {
+    return [];
+  }
+}
+
+function memoryInfo(context: AgentContext, history: ConversationMessage[]): Record<string, unknown> {
+  return {
+    conversationId: context.conversation_id ?? null,
+    storeInjected: Boolean(context.store),
+    appendMessage: typeof context.store?.appendMessage === "function",
+    getMessages: typeof context.store?.getMessages === "function",
+    claudeSessionStore: typeof context.store?.claudeSessionStore === "function",
+    loadedHistoryMessages: history.length
+  };
+}
+
+function buildClaudePrompt(message: string, kb: KnowledgeBase, history: ConversationMessage[] = []): string {
+  const historyText = formatConversationHistory(history);
+
   return [
     `用户请求：${message}`,
+    "",
+    "同一 conversation 的历史消息：",
+    historyText || "(当前没有历史消息，或本地运行时未注入 context.store)",
     "",
     "账号定位：",
     kb.account || "(data/account.md 为空)",
@@ -289,7 +355,12 @@ interface MakersChatResponse {
   };
 }
 
-async function runMakersModel(message: string, kb: KnowledgeBase, env: Env): Promise<string> {
+async function runMakersModel(
+  message: string,
+  kb: KnowledgeBase,
+  env: Env,
+  history: ConversationMessage[]
+): Promise<string> {
   const apiKey = resolveMakersApiKey(env);
   if (!apiKey) {
     throw new Error("Missing MAKERS_MODELS_KEY or AI_GATEWAY_API_KEY.");
@@ -307,7 +378,7 @@ async function runMakersModel(message: string, kb: KnowledgeBase, env: Env): Pro
       temperature: 0.7,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: buildClaudePrompt(message, kb) }
+        { role: "user", content: buildClaudePrompt(message, kb, history) }
       ]
     })
   });
@@ -363,10 +434,17 @@ async function maybeAppendMessage(
   }
 }
 
-async function runClaudeAgent(message: string, kb: KnowledgeBase, context: AgentContext): Promise<string> {
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+async function runClaudeAgent(
+  message: string,
+  kb: KnowledgeBase,
+  context: AgentContext,
+  history: ConversationMessage[]
+): Promise<string> {
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   const env = context.env ?? process.env;
-  const prompt = buildClaudePrompt(message, kb);
+  const prompt = buildClaudePrompt(message, kb, history);
 
   const options: Record<string, unknown> = {
     model: resolveModelName(env),
@@ -384,6 +462,9 @@ async function runClaudeAgent(message: string, kb: KnowledgeBase, context: Agent
     context.store?.claudeSessionStore?.() ?? context.store?.claude_session_store?.();
   if (sessionStore) {
     options.sessionStore = sessionStore;
+    if (context.conversation_id && UUID_PATTERN.test(context.conversation_id)) {
+      options.sessionId = context.conversation_id;
+    }
   }
 
   const edgeoneMcp = context.tools?.toClaudeMcpServer?.();
@@ -441,6 +522,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     return jsonResponse({ ok: false, error: (error as Error).message }, 500);
   }
 
+  const history = await loadConversationHistory(context);
   await maybeAppendMessage(context, "user", message);
 
   const forceLocal = body.local === true || body.useLocal === true;
@@ -448,13 +530,14 @@ export async function onRequest(context: AgentContext): Promise<Response> {
 
   if (!forceLocal && hasMakersCredentials(env)) {
     try {
-      const answer = await runMakersModel(message, kb, env);
+      const answer = await runMakersModel(message, kb, env, history);
       await maybeAppendMessage(context, "assistant", answer);
       return jsonResponse({
         ok: true,
         route: "/topic",
         mode: "makers-models",
         model: resolveModelName(env),
+        memory: memoryInfo(context, history),
         answer,
         dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
       });
@@ -464,6 +547,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         ok: true,
         route: "/topic",
         mode: "local-fallback",
+        memory: memoryInfo(context, history),
         warning: `Makers Models failed, returned deterministic local plan instead: ${(error as Error).message}`,
         result: fallback
       });
@@ -472,13 +556,14 @@ export async function onRequest(context: AgentContext): Promise<Response> {
 
   if (!forceLocal && hasAnthropicCredentials(env)) {
     try {
-      const answer = await runClaudeAgent(message, kb, context);
+      const answer = await runClaudeAgent(message, kb, context, history);
       await maybeAppendMessage(context, "assistant", answer);
       return jsonResponse({
         ok: true,
         route: "/topic",
         mode: "claude-agent-sdk",
         model: resolveModelName(env),
+        memory: memoryInfo(context, history),
         answer,
         dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
       });
@@ -488,6 +573,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         ok: true,
         route: "/topic",
         mode: "local-fallback",
+        memory: memoryInfo(context, history),
         warning: `Claude Agent SDK failed, returned deterministic local plan instead: ${(error as Error).message}`,
         result: fallback
       });
@@ -502,6 +588,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     route: "/topic",
     mode: "local",
     note: "未检测到 AI_GATEWAY_API_KEY 或 ANTHROPIC_API_KEY，因此使用本地确定性选题逻辑；部署到 Makers 并配置模型密钥后会走 Claude Agent SDK。",
+    memory: memoryInfo(context, history),
     result
   });
 }

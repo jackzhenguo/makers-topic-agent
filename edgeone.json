@@ -8,6 +8,9 @@
     "framework": "claude-agent-sdk",
     "dir": "agents",
     "timeout": 300,
+    "memoryQuota": {
+      "maxMessagesPerConversation": 50
+    },
     "sandbox": {
       "timeout": 300
     }
