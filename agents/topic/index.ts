@@ -471,12 +471,13 @@ async function runClaudeAgent(
   message: string,
   kb: KnowledgeBase,
   context: AgentContext,
-  history: ConversationMessage[]
+  history: ConversationMessage[],
+  enableSandboxTools = false
 ): Promise<string> {
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   const env = context.env ?? process.env;
   const prompt = buildClaudePrompt(message, kb, history);
-  const edgeoneMcp = context.tools?.toClaudeMcpServer?.();
+  const edgeoneMcp = enableSandboxTools ? context.tools?.toClaudeMcpServer?.() : undefined;
   const cwd = edgeoneMcp ? await prepareSandboxDataFiles(kb) : process.cwd();
 
   const options: Record<string, unknown> = {
@@ -558,6 +559,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
   await maybeAppendMessage(context, "user", message);
 
   const forceLocal = body.local === true || body.useLocal === true;
+  const enableSandboxTools = body.sandboxTools === true;
   const env = context.env ?? process.env;
 
   if (!forceLocal && hasMakersCredentials(env)) {
@@ -588,7 +590,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
 
   if (!forceLocal && hasAnthropicCredentials(env)) {
     try {
-      const answer = await runClaudeAgent(message, kb, context, history);
+      const answer = await runClaudeAgent(message, kb, context, history, enableSandboxTools);
       await maybeAppendMessage(context, "assistant", answer);
       return jsonResponse({
         ok: true,
@@ -596,6 +598,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         mode: "claude-agent-sdk",
         model: resolveClaudeAgentModel(env),
         providerModel: resolveModelName(env),
+        sandboxTools: enableSandboxTools,
         memory: memoryInfo(context, history),
         answer,
         dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
