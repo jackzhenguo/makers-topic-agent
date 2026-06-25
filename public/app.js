@@ -107,6 +107,10 @@ function cleanDisplayText(value) {
     .replace(/#{1,6}\s*/g, "")
     .replace(/\*\*/g, "")
     .replace(/\b(message|gaps):\s*/gi, "")
+    .replace(/我已读取\s*prompt\s*中注入的全部素材[^。；;]*[。；;]?/g, "")
+    .replace(/当前目录无\s*data\/?\s*文件夹[^。；;]*[。；;]?/g, "")
+    .replace(/直接基于已有素材生成[^。；;]*[。；;]?/g, "")
+    .replace(/以下是为公众号[^：:]*[：:]/g, "")
     .replace(/好的，我已经尽力通过文件工具读取[^。]*。?/g, "")
     .replace(/但当前沙箱中 data 目录不存在[^。]*。?/g, "")
     .replace(/\s+/g, " ")
@@ -312,6 +316,67 @@ function extractJsonFromAnswer(answer) {
   throw new Error("No JSON object found in model answer.");
 }
 
+function normalizeResultPayload(result = {}) {
+  const topics = result.candidates || result.topics || [];
+  return {
+    summary: result.summary || result.reply || result.recommended?.title || topics[0]?.title || "本地模式已生成选题",
+    reply: result.reply || result.answer || "",
+    topics,
+    recommended: result.recommended || topics[0] || "",
+    missingData: (result.nextDataActions || result.missingData || []).join?.("\n") || result.missingData || ""
+  };
+}
+
+function inferTopicsFromAnswer(answer) {
+  const text = String(answer || "")
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/\r/g, "")
+    .trim();
+  const sections = [];
+  let current = null;
+
+  text.split("\n").forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (!line) return;
+    const heading = line.match(/^(?:[-*]\s*)?(?:Topic|话题|选题)\s*(\d+|[一二三四五六七八九十])\s*[：:.\-、]\s*(.+)$/i);
+    const numbered = line.match(/^(\d+)[.、]\s*(.+)$/);
+    const match = heading || numbered;
+
+    if (match) {
+      if (current) sections.push(current);
+      current = { title: match[2].replace(/\*\*/g, "").trim(), lines: [] };
+      return;
+    }
+
+    if (current) current.lines.push(line.replace(/^[-*•]\s*/, ""));
+  });
+
+  if (current) sections.push(current);
+  const topics = sections
+    .filter((section) => section.title)
+    .slice(0, 8)
+    .map((section) => {
+      const body = section.lines.join(" ");
+      const outline = section.lines.filter((line) => /开场|背景|实操|步骤|结构|坑点|建议|总结|对比|案例/.test(line)).slice(0, 6);
+      return {
+        title: section.title,
+        angle: shortDisplayText(body, 180),
+        whyNow: "",
+        outline: outline.length ? outline : section.lines.slice(0, 5),
+        sourceUrl: ""
+      };
+    });
+
+  if (topics.length < 2) return null;
+  return {
+    summary: shortDisplayText(text, 120),
+    reply: "",
+    topics,
+    recommended: topics[0],
+    missingData: ""
+  };
+}
+
 function normalizeResponse(raw) {
   if (raw?.answer) {
     try {
@@ -326,6 +391,10 @@ function normalizeResponse(raw) {
         missingData: parsed.missingData || ""
       };
     } catch {
+      if (raw?.result) return normalizeResultPayload(raw.result);
+      const inferred = inferTopicsFromAnswer(raw.answer);
+      if (inferred) return inferred;
+
       return {
         summary: raw.answer,
         reply: raw.answer,
@@ -336,15 +405,7 @@ function normalizeResponse(raw) {
     }
   }
 
-  const result = raw?.result || {};
-  const topics = result.candidates || result.topics || [];
-  return {
-    summary: result.reply || result.recommended?.title || topics[0]?.title || "本地模式已生成选题",
-    reply: result.reply || result.answer || "",
-    topics,
-    recommended: result.recommended || topics[0] || "",
-    missingData: (result.nextDataActions || []).join("\n")
-  };
+  return normalizeResultPayload(raw?.result || {});
 }
 
 async function loadMaterials() {

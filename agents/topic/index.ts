@@ -137,7 +137,7 @@ const SANDBOX_FILE_READ_INSTRUCTIONS = [
   "如果列表中包含 data 目录，再调用文件列表工具列出 data，并调用文件读取工具读取 data/account.md、data/rules.md、data/recent-articles.json 和 data/hot-urls.json。",
   "所有 path 参数都必须是相对路径，只能使用 .、data、data/account.md、data/rules.md、data/recent-articles.json、data/hot-urls.json。",
   "禁止使用 /workspace、/home/user、/、..、绝对路径、环境变量、密钥路径或 shell 命令；也不要调用 commands 工具。",
-  "如果文件工具没有列出 data 目录，不要继续尝试读取缺失路径，直接使用 prompt 中已经注入的素材生成结果，且不要在最终回答里提到文件工具失败。",
+  "如果文件工具没有列出 data 目录，不要继续尝试读取缺失路径，直接使用 prompt 中已经注入的素材生成结果，且不要在最终回答里提到文件工具失败、prompt 注入、沙箱目录或 data 目录不存在。",
   "读取后再结合这些素材、历史消息和今日热点生成选题。不要输出文件全文。"
 ].join("\n");
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -603,7 +603,9 @@ function buildClaudePrompt(
     "最近三篇文章 JSON：",
     JSON.stringify(kb.recentArticles, null, 2),
     "",
-    "请始终输出 JSON，字段可包含 summary、reply、topics、recommended、missingData。",
+    "请始终输出 JSON，第一行必须是 {，最后一行必须是 }，不要输出任何 JSON 外的解释文字。",
+    "字段可包含 summary、reply、topics、recommended、missingData。",
+    "当用户要求生成公众号选题时，必须返回 topics 数组，不能只在 reply 里用自然语言列出选题。",
     "summary 控制在 120 个中文字符以内，reply 控制在 220 个中文字符以内，不能使用 Markdown 标题，也不要复述工具调用、沙箱路径、文件读取失败等内部过程。",
     "当用户说“喜欢话题 N”“继续展开”“展开大纲”“改得更适合某类读者”时，reply 应该输出面向公众号写作的标题、切入角度和文章结构，不要输出 shell 命令、代码块或工具调用示例，除非用户明确要求给代码/命令。",
     "missingData 只能是简短字符串或字符串数组；如果素材缺口不影响首发，留空字符串。不要返回 { message, gaps } 这类对象。",
@@ -631,6 +633,66 @@ function resolveAllowedFileTools(edgeoneMcp?: { tools: unknown; allowedTools?: s
 
   const matched = filterAllowedTools(edgeoneMcp.allowedTools ?? [], SANDBOX_FILE_TOOL_HINTS);
   return matched.length ? matched : FALLBACK_SANDBOX_FILE_TOOLS;
+}
+
+function extractJsonObjectFromAnswer(answer: string): Record<string, unknown> | undefined {
+  const text = answer.trim();
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fenced ? fenced[1] : text;
+  const firstBrace = candidate.indexOf("{");
+  const lastBrace = candidate.lastIndexOf("}");
+  if (firstBrace < 0 || lastBrace <= firstBrace) return undefined;
+
+  try {
+    const parsed = JSON.parse(candidate.slice(firstBrace, lastBrace + 1));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function answerHasTopicList(answer: string): boolean {
+  const parsed = extractJsonObjectFromAnswer(answer);
+  const topics = parsed?.topics ?? parsed?.candidates;
+  return Array.isArray(topics) && topics.length > 0;
+}
+
+function wantsTopicList(message: string): boolean {
+  const text = message.trim();
+  if (/继续|展开|改写|修改|优化|改得|改成|更适合|喜欢话题|喜欢\s*Topic|比较|为什么|解释/.test(text)) {
+    return false;
+  }
+  return /生成|重新生成|补充|列出|选题|5\s*个|五个/.test(text);
+}
+
+function sanitizeModelAnswer(answer: string): string {
+  return answer
+    .replace(/我已读取\s*prompt\s*中注入的全部素材[^。；;]*[。；;]?/g, "")
+    .replace(/当前目录无\s*data\/?\s*文件夹[^。；;]*[。；;]?/g, "")
+    .replace(/直接基于已有素材生成[^。；;]*[。；;]?/g, "")
+    .trim();
+}
+
+function modelSuccessPayload(
+  base: Record<string, unknown>,
+  answer: string,
+  message: string,
+  kb: KnowledgeBase
+): Record<string, unknown> {
+  const sanitizedAnswer = sanitizeModelAnswer(answer);
+  const payload: Record<string, unknown> = {
+    ...base,
+    answer: sanitizedAnswer || answer
+  };
+
+  if (wantsTopicList(message) && !answerHasTopicList(answer)) {
+    payload.result = makeLocalTopicPlan(message, kb);
+    payload.warning = "Model returned plain text; structured topics were recovered for the UI.";
+  }
+
+  return payload;
 }
 
 interface MakersChatResponse {
@@ -867,15 +929,21 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
         await maybeAppendMessage(context, "assistant", answer);
       });
-      return jsonResponse({
-        ok: true,
-        route: "/topic",
-        mode: "makers-models",
-        model: resolveModelName(env),
-        memory: memoryInfo(context, history),
-        answer,
-        dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
-      });
+      return jsonResponse(
+        modelSuccessPayload(
+          {
+            ok: true,
+            route: "/topic",
+            mode: "makers-models",
+            model: resolveModelName(env),
+            memory: memoryInfo(context, history),
+            dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
+          },
+          answer,
+          message,
+          kb
+        )
+      );
     } catch (error) {
       const fallback = await withSpan(
         context,
@@ -905,17 +973,23 @@ export async function onRequest(context: AgentContext): Promise<Response> {
       await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
         await maybeAppendMessage(context, "assistant", answer);
       });
-      return jsonResponse({
-        ok: true,
-        route: "/topic",
-        mode: "claude-agent-sdk",
-        model: resolveClaudeAgentModel(env),
-        providerModel: resolveModelName(env),
-        sandboxTools: enableSandboxTools,
-        memory: memoryInfo(context, history),
-        answer,
-        dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
-      });
+      return jsonResponse(
+        modelSuccessPayload(
+          {
+            ok: true,
+            route: "/topic",
+            mode: "claude-agent-sdk",
+            model: resolveClaudeAgentModel(env),
+            providerModel: resolveModelName(env),
+            sandboxTools: enableSandboxTools,
+            memory: memoryInfo(context, history),
+            dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
+          },
+          answer,
+          message,
+          kb
+        )
+      );
     } catch (error) {
       const fallback = await withSpan(
         context,
