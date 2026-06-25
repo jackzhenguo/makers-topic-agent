@@ -36,6 +36,7 @@ const els = {
   copyJsonBtn: document.querySelector("#copyJsonBtn"),
   downloadBtn: document.querySelector("#downloadBtn"),
   copyPreviewBtn: document.querySelector("#copyPreviewBtn"),
+  resultBlock: document.querySelector("#resultBlock"),
   requestStatus: document.querySelector("#requestStatus"),
   resultTitle: document.querySelector("#resultTitle"),
   recommendedCard: document.querySelector("#recommendedCard"),
@@ -298,7 +299,11 @@ function renderHistory() {
     `;
     btn.addEventListener("click", () => {
       els.promptInput.value = item.message || els.promptInput.value;
-      renderResult(item.raw, { skipHistory: true, updateChat: false });
+      renderResult(item.raw, {
+        skipHistory: true,
+        updateChat: false,
+        showResult: item.showResult ?? (item.raw?.intent?.showResult === true)
+      });
     });
     els.historyList.appendChild(btn);
   });
@@ -484,15 +489,21 @@ function renderResult(raw, options = {}) {
   state.lastRaw = raw;
   state.parsed = normalizeResponse(raw);
   const topicResult = hasTopics(state.parsed);
+  const showResult = options.showResult ?? (raw?.intent?.showResult === true);
   state.topicsExpanded = false;
   state.expandedTopics = new Set();
   els.rawOutput.textContent = JSON.stringify(raw, null, 2);
-  els.resultTitle.textContent = raw.mode === "local-fallback" ? "模型失败，已回退本地结果" : topicResult ? "已生成选题" : "已生成回复";
-  els.requestStatus.textContent = `${raw.mode || "done"}${raw.model ? ` · ${raw.model}` : ""}`;
 
-  renderRecommended();
-  renderTopics();
-  renderPreview();
+  if (showResult) {
+    els.resultBlock.hidden = false;
+    els.resultTitle.textContent = raw.mode === "local-fallback" ? "模型失败，已回退本地结果" : topicResult ? "已生成选题" : "已生成回复";
+    els.requestStatus.textContent = `${raw.mode || "done"}${raw.model ? ` · ${raw.model}` : ""}`;
+    renderRecommended();
+    renderTopics();
+    renderPreview();
+  } else {
+    els.resultBlock.hidden = true;
+  }
 
   if (options.pendingId) {
     replaceChatMessage(options.pendingId, assistantChatMessage(state.parsed, raw));
@@ -503,7 +514,8 @@ function renderResult(raw, options = {}) {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       createdAt: Date.now(),
       message: options.message || els.promptInput.value.trim(),
-      title: resultHeadline(state.parsed),
+      title: showResult ? resultHeadline(state.parsed) : options.message || "继续追问",
+      showResult,
       raw
     });
   }
@@ -511,7 +523,8 @@ function renderResult(raw, options = {}) {
 
 function assistantSummary(parsed, raw) {
   const topics = parsed?.topics || [];
-  if (topics.length) {
+  const showResult = raw?.intent?.showResult === true;
+  if (showResult && topics.length) {
     const summary = cleanDisplayText(parsed?.summary || "");
     if (summary) return summary;
 
@@ -525,12 +538,12 @@ function assistantSummary(parsed, raw) {
 
 function assistantChatMessage(parsed, raw) {
   const topics = parsed?.topics || [];
-  const topicResult = topics.length > 0;
+  const topicResult = raw?.intent?.showResult === true && topics.length > 0;
   return {
     role: "assistant",
     title: topicResult ? resultHeadline(parsed) : "继续追问",
     content: assistantSummary(parsed, raw),
-    topics: topics.slice(0, 3).map((topic, index) => `Topic ${index + 1}: ${topicTitle(topic, index)}`),
+    topics: topicResult ? topics.slice(0, 3).map((topic, index) => `Topic ${index + 1}: ${topicTitle(topic, index)}`) : [],
     mode: raw?.mode || "done"
   };
 }

@@ -83,21 +83,23 @@
             </div>
           </div>
 
-          <div class="result-toolbar">
-            <div>
-              <p class="eyebrow">Result</p>
-              <h2 id="resultTitle">等待生成</h2>
+          <div class="result-section" id="resultBlock" hidden>
+            <div class="result-toolbar">
+              <div>
+                <p class="eyebrow">Result</p>
+                <h2 id="resultTitle">等待生成</h2>
+              </div>
+              <span class="status-pill muted" id="requestStatus">Ready</span>
             </div>
-            <span class="status-pill muted" id="requestStatus">Ready</span>
-          </div>
 
-          <div class="recommended" id="recommendedCard">
-            <span class="tag">推荐首发</span>
-            <h3>生成后会显示最适合首发的选题</h3>
-            <p>右侧会同步生成公众号风格预览。</p>
-          </div>
+            <div class="recommended" id="recommendedCard">
+              <span class="tag">推荐首发</span>
+              <h3>生成后会显示最适合首发的选题</h3>
+              <p>右侧会同步生成公众号风格预览。</p>
+            </div>
 
-          <div class="topic-grid" id="topicGrid"></div>
+            <div class="topic-grid" id="topicGrid"></div>
+          </div>
         </section>
 
         <aside class="preview-panel">

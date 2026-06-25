@@ -547,6 +547,15 @@ textarea:focus {
   gap: 12px;
 }
 
+.result-section {
+  display: grid;
+  gap: 12px;
+}
+
+.result-section[hidden] {
+  display: none;
+}
+
 .recommended {
   border: 1px solid rgba(229, 189, 104, 0.34);
   border-radius: 8px;

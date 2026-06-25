@@ -86,6 +86,17 @@ interface ConversationMessage {
   content?: unknown;
 }
 
+type IntentType = "generate_topics" | "list_existing_topics" | "expand_topic" | "follow_up" | "other";
+
+interface IntentResult {
+  type: IntentType;
+  showResult: boolean;
+  confidence: number;
+  reason: string;
+  source: "model" | "default";
+  topicIndex?: number | null;
+}
+
 interface TraceSpan {
   setAttributes?: (attrs: Record<string, string | number | boolean>) => void;
 }
@@ -114,6 +125,10 @@ interface DailyNewsCollection {
 const DAILY_HOT_SOURCE_URL = "https://zglg.work/ai/today";
 const DAILY_HOT_CACHE_MS = 10 * 60 * 1000;
 let dailyHotCache: { expiresAt: number; items: HotUrl[] } | undefined;
+
+function readEnvValue(env: Env | undefined, key: string): string | undefined {
+  return env?.[key] || process.env[key];
+}
 
 const SYSTEM_PROMPT = [
   "你是 makers-topic-agent，一个服务于公众号/视频号内容生产的选题 Agent。",
@@ -594,6 +609,58 @@ function makeLocalFollowupReply(message: string, kb: KnowledgeBase, history: Con
   };
 }
 
+function makeLocalTopicListReply(message: string, kb: KnowledgeBase, history: ConversationMessage[]) {
+  const plan = lastTopicPlanFromHistory(history);
+  const fallbackPlan = makeLocalTopicPlan(message, kb);
+  const topics = (plan?.topics.length ? plan.topics : fallbackPlan.candidates).slice(0, 5);
+  const lines = topics.map((topic, index) => {
+    const title = topicText(topic, "title") || topicText(topic, "event") || `Topic ${index + 1}`;
+    const angle = topicText(topic, "angle") || topicText(topic, "summary") || topicText(topic, "whyNow");
+    return `Topic ${index + 1}: ${title}${angle ? `。${angle}` : ""}`;
+  });
+
+  return {
+    request: message,
+    reply: lines.length
+      ? `上一轮可继续推进的选题有：${lines.join(" ")}`
+      : "当前会话里还没有可复用的选题列表。你可以先让我结合今日热点生成 5 个公众号选题。",
+    recommended: lines[0]
+      ? {
+          title: "已有选题列表",
+          angle: lines.join(" ")
+        }
+      : undefined
+  };
+}
+
+function makeIntentUnavailableReply(message: string, intent: IntentResult) {
+  return {
+    request: message,
+    reply: `意图识别模型暂时不可用，所以本轮没有继续执行生成或改写。请先检查模型 API Key / Base URL 配置，再重试。错误摘要：${intent.reason}`,
+    recommended: {
+      title: "意图识别模型不可用",
+      angle: "为避免把普通追问误判成重新生成选题，系统在无法完成模型意图识别时会停止自动生成。"
+    }
+  };
+}
+
+function makeLocalReplyForIntent(
+  message: string,
+  kb: KnowledgeBase,
+  history: ConversationMessage[],
+  intent: IntentResult
+) {
+  if (intent.source === "default" && intent.reason.includes("intent model")) {
+    return makeIntentUnavailableReply(message, intent);
+  }
+
+  if (intent.type === "list_existing_topics") {
+    return makeLocalTopicListReply(message, kb, history);
+  }
+
+  return makeLocalFollowupReply(message, kb, history);
+}
+
 function stringifyStoredContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
@@ -670,12 +737,17 @@ function buildClaudePrompt(
   message: string,
   kb: KnowledgeBase,
   history: ConversationMessage[] = [],
-  requireSandboxFileReads = false
+  requireSandboxFileReads = false,
+  intent?: IntentResult
 ): string {
   const historyText = formatConversationHistory(history);
+  const intentText = JSON.stringify(intent || defaultIntent("intent not classified"), null, 2);
 
   return [
     `用户请求：${message}`,
+    "",
+    "本轮意图识别 JSON：",
+    intentText,
     "",
     ...(requireSandboxFileReads ? [SANDBOX_FILE_READ_INSTRUCTIONS, ""] : []),
     "同一 conversation 的历史消息：",
@@ -695,6 +767,7 @@ function buildClaudePrompt(
     "",
     "请始终输出 JSON，第一行必须是 {，最后一行必须是 }，不要输出任何 JSON 外的解释文字。",
     "字段可包含 summary、reply、topics、recommended、missingData。",
+    "如果本轮意图 type 不是 generate_topics 或 showResult 不是 true，请只在 reply 中回答追问，不要返回新的 topics 数组。",
     "当用户要求生成公众号选题时，必须返回 topics 数组，不能只在 reply 里用自然语言列出选题。",
     "summary 控制在 120 个中文字符以内，reply 控制在 220 个中文字符以内，不能使用 Markdown 标题，也不要复述工具调用、沙箱路径、文件读取失败等内部过程。",
     "当用户说“喜欢话题 N”“继续展开”“展开大纲”“改得更适合某类读者”时，reply 应该输出面向公众号写作的标题、切入角度和文章结构，不要输出 shell 命令、代码块或工具调用示例，除非用户明确要求给代码/命令。",
@@ -749,12 +822,196 @@ function answerHasTopicList(answer: string): boolean {
   return Array.isArray(topics) && topics.length > 0;
 }
 
-function wantsTopicList(message: string): boolean {
-  const text = message.trim();
-  if (/继续|展开|改写|修改|优化|改得|改成|更适合|喜欢话题|喜欢\s*Topic|比较|为什么|解释/.test(text)) {
-    return false;
+function defaultIntent(reason: string): IntentResult {
+  return {
+    type: "other",
+    showResult: false,
+    confidence: 0,
+    reason,
+    source: "default",
+    topicIndex: null
+  };
+}
+
+function normalizeIntentResult(value: unknown, source: IntentResult["source"] = "model"): IntentResult {
+  const objectValue = value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+  const allowedTypes = new Set<IntentType>([
+    "generate_topics",
+    "list_existing_topics",
+    "expand_topic",
+    "follow_up",
+    "other"
+  ]);
+  const rawType = typeof objectValue.type === "string" ? objectValue.type : "";
+  const type = allowedTypes.has(rawType as IntentType) ? (rawType as IntentType) : "other";
+  const confidence = Number(objectValue.confidence);
+  const topicIndex = Number(objectValue.topicIndex);
+
+  return {
+    type,
+    showResult: type === "generate_topics" && objectValue.showResult !== false,
+    confidence: Number.isFinite(confidence) ? Math.max(0, Math.min(confidence, 1)) : 0.5,
+    reason: typeof objectValue.reason === "string" ? objectValue.reason.slice(0, 240) : "model classified intent",
+    source,
+    topicIndex: Number.isFinite(topicIndex) ? topicIndex : null
+  };
+}
+
+function buildIntentClassifierPrompt(message: string, history: ConversationMessage[]): string {
+  const historyText = formatConversationHistory(history).slice(0, 5000);
+
+  return [
+    "You classify the user's intent for a Chinese WeChat topic-agent.",
+    "Return only a compact JSON object. Do not write markdown.",
+    "",
+    "Allowed JSON shape:",
+    "{\"type\":\"generate_topics|list_existing_topics|expand_topic|follow_up|other\",\"showResult\":false,\"confidence\":0.0,\"reason\":\"short reason\",\"topicIndex\":null}",
+    "",
+    "Intent rules:",
+    "- generate_topics: the user explicitly asks to generate, regenerate, design, recommend, or add a new list of WeChat article topic ideas. showResult must be true.",
+    "- list_existing_topics: the user asks what topics were already generated, asks to list existing topics, or asks for the previous three/five topics. showResult must be false.",
+    "- expand_topic: the user asks to expand, rewrite, optimize, compare, or tailor a specific Topic N or an already generated topic. showResult must be false.",
+    "- follow_up: the user asks a normal contextual question based on the previous answer. showResult must be false.",
+    "- other: unrelated or ambiguous requests. showResult must be false.",
+    "",
+    "Examples:",
+    "User: 结合最近三篇文章和今日 AI 热点，生成 5 个适合公众号的高点击选题 => {\"type\":\"generate_topics\",\"showResult\":true,\"confidence\":0.98,\"reason\":\"explicitly asks to generate 5 topic ideas\",\"topicIndex\":null}",
+    "User: 有哪三个话题？ => {\"type\":\"list_existing_topics\",\"showResult\":false,\"confidence\":0.95,\"reason\":\"asks to list existing topics, not regenerate\",\"topicIndex\":null}",
+    "User: 喜欢话题3，继续展开 => {\"type\":\"expand_topic\",\"showResult\":false,\"confidence\":0.97,\"reason\":\"asks to expand an existing topic\",\"topicIndex\":3}",
+    "User: 把 Topic 2 改得更适合开发者 => {\"type\":\"expand_topic\",\"showResult\":false,\"confidence\":0.98,\"reason\":\"asks to adjust a specific existing topic\",\"topicIndex\":2}",
+    "",
+    "Conversation history:",
+    historyText || "(empty)",
+    "",
+    `Current user message: ${message}`,
+    "",
+    "JSON:"
+  ].join("\n");
+}
+
+async function runMakersIntentClassifier(
+  message: string,
+  history: ConversationMessage[],
+  env: Env
+): Promise<IntentResult> {
+  const apiKey = resolveMakersApiKey(env);
+  if (!apiKey) throw new Error("Missing Makers model key for intent classification.");
+
+  const baseUrl = resolveMakersBaseUrl(env).replace(/\/$/, "");
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: resolveModelName(env),
+      temperature: 0,
+      max_tokens: 360,
+      messages: [
+        { role: "system", content: "You are a strict intent classifier. Return JSON only." },
+        { role: "user", content: buildIntentClassifierPrompt(message, history) }
+      ]
+    })
+  });
+
+  const text = await response.text();
+  let payload: MakersChatResponse | undefined;
+  try {
+    payload = text ? (JSON.parse(text) as MakersChatResponse) : undefined;
+  } catch {
+    payload = undefined;
   }
-  return /生成|重新生成|补充|列出|选题|5\s*个|五个/.test(text);
+
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || text || `Intent classifier failed: HTTP ${response.status}`);
+  }
+
+  const answer = payload?.choices?.[0]?.message?.content || payload?.choices?.[0]?.delta?.content || "";
+  const parsed = extractJsonObjectFromAnswer(answer);
+  if (!parsed) throw new Error("Intent classifier did not return JSON.");
+  return normalizeIntentResult(parsed, "model");
+}
+
+function anthropicMessagesUrl(baseUrl: string): string {
+  const base = baseUrl.replace(/\/$/, "");
+  return base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`;
+}
+
+async function runAnthropicIntentClassifier(
+  message: string,
+  history: ConversationMessage[],
+  env: Env
+): Promise<IntentResult> {
+  const apiKey = readEnvValue(env, "ANTHROPIC_API_KEY");
+  if (!apiKey) throw new Error("Missing ANTHROPIC_API_KEY for intent classification.");
+
+  const baseUrl = readEnvValue(env, "ANTHROPIC_BASE_URL") || "https://api.anthropic.com";
+  const response = await fetch(anthropicMessagesUrl(baseUrl), {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: resolveClaudeAgentModel(env),
+      max_tokens: 360,
+      temperature: 0,
+      system: "You are a strict intent classifier. Return JSON only.",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: buildIntentClassifierPrompt(message, history) }]
+        }
+      ]
+    })
+  });
+
+  const text = await response.text();
+  let payload: { content?: Array<{ text?: string }>; error?: { message?: string } } | undefined;
+  try {
+    payload = text ? (JSON.parse(text) as { content?: Array<{ text?: string }>; error?: { message?: string } }) : undefined;
+  } catch {
+    payload = undefined;
+  }
+
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || text || `Anthropic intent classifier failed: HTTP ${response.status}`);
+  }
+
+  const answer = payload?.content?.map((block) => block.text || "").filter(Boolean).join("\n") || "";
+  const parsed = extractJsonObjectFromAnswer(answer);
+  if (!parsed) throw new Error("Anthropic intent classifier did not return JSON.");
+  return normalizeIntentResult(parsed, "model");
+}
+
+async function classifyIntentWithModel(
+  message: string,
+  history: ConversationMessage[],
+  env: Env
+): Promise<IntentResult> {
+  const errors: string[] = [];
+
+  if (hasMakersCredentials(env)) {
+    try {
+      return await runMakersIntentClassifier(message, history, env);
+    } catch (error) {
+      errors.push(`makers: ${(error as Error).message}`);
+    }
+  }
+
+  if (hasAnthropicCredentials(env)) {
+    try {
+      return await runAnthropicIntentClassifier(message, history, env);
+    } catch (error) {
+      errors.push(`anthropic: ${(error as Error).message}`);
+    }
+  }
+
+  return defaultIntent(errors.length ? `intent model unavailable: ${errors.join("; ")}` : "intent model credentials missing");
 }
 
 function sanitizeModelAnswer(answer: string): string {
@@ -769,15 +1026,17 @@ function modelSuccessPayload(
   base: Record<string, unknown>,
   answer: string,
   message: string,
-  kb: KnowledgeBase
+  kb: KnowledgeBase,
+  intent: IntentResult
 ): Record<string, unknown> {
   const sanitizedAnswer = sanitizeModelAnswer(answer);
   const payload: Record<string, unknown> = {
     ...base,
+    intent,
     answer: sanitizedAnswer || answer
   };
 
-  if (wantsTopicList(message) && !answerHasTopicList(answer)) {
+  if (intent.type === "generate_topics" && intent.showResult && !answerHasTopicList(answer)) {
     payload.result = makeLocalTopicPlan(message, kb);
     payload.warning = "Model returned plain text; structured topics were recovered for the UI.";
   }
@@ -803,7 +1062,8 @@ async function runMakersModel(
   message: string,
   kb: KnowledgeBase,
   env: Env,
-  history: ConversationMessage[]
+  history: ConversationMessage[],
+  intent: IntentResult
 ): Promise<string> {
   const apiKey = resolveMakersApiKey(env);
   if (!apiKey) {
@@ -822,7 +1082,7 @@ async function runMakersModel(
       temperature: 0.7,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: buildClaudePrompt(message, kb, history) }
+        { role: "user", content: buildClaudePrompt(message, kb, history, false, intent) }
       ]
     })
   });
@@ -885,14 +1145,15 @@ async function runClaudeAgent(
   kb: KnowledgeBase,
   context: AgentContext,
   history: ConversationMessage[],
-  enableSandboxTools = false
+  enableSandboxTools = false,
+  intent: IntentResult
 ): Promise<string> {
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   const env = context.env ?? process.env;
   const candidateMcp = enableSandboxTools ? context.tools?.toClaudeMcpServer?.() : undefined;
   const allowedFileTools = resolveAllowedFileTools(candidateMcp);
   const edgeoneMcp = candidateMcp && allowedFileTools.length > 0 ? candidateMcp : undefined;
-  const prompt = buildClaudePrompt(message, kb, history, Boolean(edgeoneMcp));
+  const prompt = buildClaudePrompt(message, kb, history, Boolean(edgeoneMcp), intent);
   const cwd = edgeoneMcp ? await prepareSandboxDataFiles(kb) : process.cwd();
   const systemPrompt = edgeoneMcp ? `${SYSTEM_PROMPT}\n\n${SANDBOX_FILE_READ_INSTRUCTIONS}` : SYSTEM_PROMPT;
 
@@ -1002,11 +1263,30 @@ export async function onRequest(context: AgentContext): Promise<Response> {
   await analyzeAccountStyle(context, kb);
   await scoreHotspots(context, kb);
 
+  const env = context.env ?? process.env;
+  const intent = await withSpan(
+    context,
+    "classify_intent",
+    { "agent.step": "classify_intent" },
+    async (span) => {
+      const result = await classifyIntentWithModel(message, history, env);
+      span.setAttributes?.({
+        "intent.type": result.type,
+        "intent.show_result": result.showResult,
+        "intent.confidence": result.confidence,
+        "intent.source": result.source,
+        "intent.topic_index": result.topicIndex ?? 0,
+        "intent.reason": result.reason.slice(0, 180)
+      });
+      return result;
+    }
+  );
+
   const forceLocal = body.local === true || body.useLocal === true;
   const enableSandboxTools = body.sandboxTools !== false;
-  const needsTopicList = wantsTopicList(message);
+  const needsTopicList = intent.type === "generate_topics" && intent.showResult;
   const needsSandboxTools = enableSandboxTools && needsTopicList;
-  const env = context.env ?? process.env;
+  const modelStep = needsTopicList ? "generate_topics" : "answer_followup";
   const shouldUseClaudeAgent =
     !forceLocal && hasAnthropicCredentials(env) && (needsSandboxTools || !hasMakersCredentials(env));
 
@@ -1014,9 +1294,9 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     try {
       const answer = await withSpan(
         context,
-        "generate_topics",
-        { "agent.step": "generate_topics", "agent.runtime": "makers-models" },
-        async () => runMakersModel(message, kb, env, history)
+        modelStep,
+        { "agent.step": modelStep, "agent.runtime": "makers-models" },
+        async () => runMakersModel(message, kb, env, history, intent)
       );
       await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
         await maybeAppendMessage(context, "assistant", answer);
@@ -1033,7 +1313,8 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           },
           answer,
           message,
-          kb
+          kb,
+          intent
         )
       );
     } catch (error) {
@@ -1041,12 +1322,13 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         context,
         "generate_local_fallback",
         { "agent.step": "generate_local_fallback", "agent.runtime": "local" },
-        async () => (needsTopicList ? makeLocalTopicPlan(message, kb) : makeLocalFollowupReply(message, kb, history))
+        async () => (needsTopicList ? makeLocalTopicPlan(message, kb) : makeLocalReplyForIntent(message, kb, history, intent))
       );
       return jsonResponse({
         ok: true,
         route: "/topic",
         mode: "local-fallback",
+        intent,
         memory: memoryInfo(context, history),
         warning: `Makers Models failed, returned deterministic local ${needsTopicList ? "plan" : "follow-up"} instead: ${(error as Error).message}`,
         result: fallback
@@ -1058,9 +1340,9 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     try {
       const answer = await withSpan(
         context,
-        "generate_topics",
-        { "agent.step": "generate_topics", "agent.runtime": "claude-agent-sdk" },
-        async () => runClaudeAgent(message, kb, context, history, needsSandboxTools)
+        modelStep,
+        { "agent.step": modelStep, "agent.runtime": "claude-agent-sdk" },
+        async () => runClaudeAgent(message, kb, context, history, needsSandboxTools, intent)
       );
       await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
         await maybeAppendMessage(context, "assistant", answer);
@@ -1079,7 +1361,8 @@ export async function onRequest(context: AgentContext): Promise<Response> {
           },
           answer,
           message,
-          kb
+          kb,
+          intent
         )
       );
     } catch (error) {
@@ -1087,12 +1370,13 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         context,
         "generate_local_fallback",
         { "agent.step": "generate_local_fallback", "agent.runtime": "local" },
-        async () => (needsTopicList ? makeLocalTopicPlan(message, kb) : makeLocalFollowupReply(message, kb, history))
+        async () => (needsTopicList ? makeLocalTopicPlan(message, kb) : makeLocalReplyForIntent(message, kb, history, intent))
       );
       return jsonResponse({
         ok: true,
         route: "/topic",
         mode: "local-fallback",
+        intent,
         memory: memoryInfo(context, history),
         warning: `Claude Agent SDK failed, returned deterministic local ${needsTopicList ? "plan" : "follow-up"} instead: ${(error as Error).message}`,
         result: fallback
@@ -1104,7 +1388,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     context,
     needsTopicList ? "generate_local_topics" : "generate_local_followup",
     { "agent.step": needsTopicList ? "generate_local_topics" : "generate_local_followup", "agent.runtime": "local" },
-    async () => (needsTopicList ? makeLocalTopicPlan(message, kb) : makeLocalFollowupReply(message, kb, history))
+    async () => (needsTopicList ? makeLocalTopicPlan(message, kb) : makeLocalReplyForIntent(message, kb, history, intent))
   );
   await withSpan(context, "persist_assistant_message", { "agent.step": "persist_assistant_message" }, async () => {
     await maybeAppendMessage(context, "assistant", JSON.stringify(result));
@@ -1114,7 +1398,10 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     ok: true,
     route: "/topic",
     mode: "local",
-    note: "未检测到 AI_GATEWAY_API_KEY 或 ANTHROPIC_API_KEY，因此使用本地确定性选题逻辑；部署到 Makers 并配置模型密钥后会走 Claude Agent SDK。",
+    intent,
+    note: forceLocal
+      ? "已选择本地模式；意图识别仍会优先尝试可用模型，模型不可用时不会硬猜用户意图。"
+      : "未检测到可用模型密钥，因此使用本地确定性逻辑；部署到 Makers 并配置模型密钥后会走 Claude Agent SDK。",
     memory: memoryInfo(context, history),
     result
   });
