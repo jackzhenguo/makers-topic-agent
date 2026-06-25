@@ -98,6 +98,57 @@ function shortText(value, length = 84) {
   return text.length > length ? `${text.slice(0, length)}...` : text;
 }
 
+function cleanDisplayText(value) {
+  return readableText(value)
+    .replace(/```[\s\S]*?```/g, "")
+    .replace(/#{1,6}\s*/g, "")
+    .replace(/\b(message|gaps):\s*/gi, "")
+    .replace(/好的，我已经尽力通过文件工具读取[^。]*。?/g, "")
+    .replace(/但当前沙箱中 data 目录不存在[^。]*。?/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function shortDisplayText(value, length = 84) {
+  const text = cleanDisplayText(value);
+  return text.length > length ? `${text.slice(0, length)}...` : text;
+}
+
+function topicAngle(topic) {
+  return topic?.angle || topic?.whyNow || topic?.summary || topic?.fitWithAccount || "";
+}
+
+function recommendedTopicFromText(text, topics = []) {
+  if (!text || !topics.length) return null;
+  const topicMatch = String(text).match(/topics?\s*\[?\s*(\d+)\s*\]?|Topic\s*(\d+)/i);
+  if (!topicMatch) return topics[0];
+
+  const rawIndex = Number(topicMatch[1] || topicMatch[2]);
+  const index = String(text).includes("[") ? rawIndex : rawIndex - 1;
+  return topics[index] || topics[0];
+}
+
+function recommendedTitle(parsed) {
+  const recommended = parsed?.recommended;
+  if (recommended && typeof recommended === "object") {
+    return recommended.title || parsed?.topics?.[0]?.title || "已生成选题";
+  }
+
+  if (typeof recommended === "string" && recommended.trim()) {
+    return recommendedTopicFromText(recommended, parsed?.topics)?.title || recommended;
+  }
+  return parsed?.topics?.[0]?.title || parsed?.summary || "已生成选题";
+}
+
+function recommendedAngle(parsed) {
+  const recommended = parsed?.recommended;
+  if (recommended && typeof recommended === "object") return topicAngle(recommended);
+  if (typeof recommended === "string" && recommended.trim()) {
+    return topicAngle(recommendedTopicFromText(recommended, parsed?.topics));
+  }
+  return topicAngle(parsed?.topics?.[0]) || parsed?.summary || parsed?.reply || "";
+}
+
 function sourceLabel(value) {
   if (!value) return "素材库";
   try {
@@ -210,10 +261,7 @@ function saveHistoryEntry(entry) {
 }
 
 function resultHeadline(parsed) {
-  const recommended = parsed?.recommended;
-  if (recommended && typeof recommended === "object" && recommended.title) return recommended.title;
-  if (typeof recommended === "string" && recommended.trim()) return recommended.trim();
-  return parsed?.topics?.[0]?.title || parsed?.summary || "已生成选题";
+  return shortDisplayText(recommendedTitle(parsed), 72);
 }
 
 function renderHistory() {
@@ -391,13 +439,27 @@ function renderResult(raw, options = {}) {
   }
 }
 
+function assistantSummary(parsed, raw) {
+  const topics = parsed?.topics || [];
+  if (topics.length) {
+    const summary = cleanDisplayText(parsed?.summary || "");
+    if (summary) return summary;
+
+    const title = recommendedTitle(parsed);
+    const angle = recommendedAngle(parsed);
+    return `已生成 ${topics.length} 个选题，推荐首发「${shortDisplayText(title, 48)}」。${shortDisplayText(angle, 110)}`;
+  }
+
+  return parsed?.reply || parsed?.summary || raw?.answer || "已生成回复。";
+}
+
 function assistantChatMessage(parsed, raw) {
   const topics = parsed?.topics || [];
   return {
     role: "assistant",
     title: resultHeadline(parsed),
-    content: parsed?.reply || parsed?.summary || raw?.answer || "已生成回复。",
-    topics: topics.slice(0, 5).map((topic, index) => `Topic ${index + 1}: ${topicTitle(topic, index)}`),
+    content: assistantSummary(parsed, raw),
+    topics: topics.slice(0, 3).map((topic, index) => `Topic ${index + 1}: ${topicTitle(topic, index)}`),
     mode: raw?.mode || "done"
   };
 }
@@ -411,9 +473,9 @@ function renderChatThread() {
         <div class="chat-message ${message.role === "user" ? "user" : "assistant"}">
           <div class="chat-role">${escapeHtml(roleLabel)}</div>
           <div class="chat-bubble">
-            ${message.title ? `<h4>${escapeHtml(shortText(message.title, 96))}</h4>` : ""}
-            <div>${escapeHtml(shortText(message.content || "", message.role === "user" ? 360 : 460))}</div>
-            ${topics.length ? `<ul>${topics.map((topic) => `<li>${escapeHtml(shortText(topic, 110))}</li>`).join("")}</ul>` : ""}
+            ${message.title ? `<h4>${escapeHtml(shortDisplayText(message.title, 82))}</h4>` : ""}
+            <div>${escapeHtml(shortDisplayText(message.content || "", message.role === "user" ? 300 : 240))}</div>
+            ${topics.length ? `<ul>${topics.map((topic) => `<li>${escapeHtml(shortDisplayText(topic, 88))}</li>`).join("")}</ul>` : ""}
           </div>
         </div>
       `;
@@ -423,18 +485,12 @@ function renderChatThread() {
 }
 
 function renderRecommended() {
-  const recommended = state.parsed?.recommended || "";
-  const text =
-    typeof recommended === "string"
-      ? recommended
-      : [recommended.title, recommended.angle || recommended.whyNow || recommended.summary]
-          .map(readableText)
-          .filter(Boolean)
-          .join("。");
+  const title = recommendedTitle(state.parsed);
+  const angle = recommendedAngle(state.parsed);
   els.recommendedCard.innerHTML = `
     <span class="tag">推荐首发</span>
-    <h3>${escapeHtml(shortText(text || state.parsed?.reply || state.parsed?.summary, 120) || "等待推荐")}</h3>
-    ${state.parsed?.missingData ? `<p>${escapeHtml(shortText(state.parsed.missingData, 220))}</p>` : ""}
+    <h3>${escapeHtml(shortDisplayText(title, 86) || "等待推荐")}</h3>
+    ${angle ? `<p>${escapeHtml(shortDisplayText(angle, 132))}</p>` : ""}
   `;
 }
 
@@ -448,22 +504,22 @@ function renderTopics() {
   els.topicGrid.innerHTML = "";
 
   if (!topics.length) {
-    els.topicGrid.innerHTML = `<div class="empty-state">${escapeHtml(shortText(state.parsed?.reply || state.parsed?.summary || "这轮是普通对话，没有新的 topic 列表。", 180))}</div>`;
+    els.topicGrid.innerHTML = `<div class="empty-state">${escapeHtml(shortDisplayText(state.parsed?.reply || state.parsed?.summary || "这轮是普通对话，没有新的 topic 列表。", 160))}</div>`;
     return;
   }
 
   visibleTopics.forEach((topic, index) => {
     const expanded = state.expandedTopics.has(index);
     const outline = expanded ? splitOutline(topic.outline).slice(0, 5) : [];
-    const topicBody = topic.angle || topic.whyNow || topic.summary || "";
+    const topicBody = topicAngle(topic);
     const card = document.createElement("article");
     card.className = `topic-card${expanded ? " expanded" : ""}`;
     card.tabIndex = 0;
     card.innerHTML = `
       <span class="tag">Topic ${index + 1}</span>
-      <h3>${escapeHtml(shortText(topicTitle(topic, index), expanded ? 120 : 54))}</h3>
-      <p>${escapeHtml(shortText(topicBody, expanded ? 420 : 92))}</p>
-      ${outline.length ? `<ul>${outline.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
+      <h3>${escapeHtml(shortDisplayText(topicTitle(topic, index), expanded ? 110 : 46))}</h3>
+      <p>${escapeHtml(shortDisplayText(topicBody, expanded ? 300 : 72))}</p>
+      ${outline.length ? `<ul>${outline.map((item) => `<li>${escapeHtml(shortDisplayText(item, 78))}</li>`).join("")}</ul>` : ""}
       <div class="topic-meta">
         ${(topic.tags || []).slice(0, 4).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}
       </div>
@@ -505,13 +561,13 @@ function firstTopic() {
 
 function renderPreview(topic = firstTopic()) {
   const title = topic ? topicTitle(topic, 0) : "选题生成后显示标题";
-  const summary = topic?.angle || topic?.whyNow || state.parsed?.summary || "这里会展示首推选题的切入角度、为什么现在写、以及文章结构。";
-  const outline = splitOutline(topic?.outline);
+  const summary = topicAngle(topic) || state.parsed?.summary || "这里会展示首推选题的切入角度、为什么现在写、以及文章结构。";
+  const outline = splitOutline(topic?.outline).slice(0, 5);
 
-  els.phonePreview.querySelector("h3").textContent = title;
-  els.phonePreview.querySelector(".preview-summary").textContent = summary;
+  els.phonePreview.querySelector("h3").textContent = shortDisplayText(title, 54);
+  els.phonePreview.querySelector(".preview-summary").textContent = shortDisplayText(summary, 118);
   els.previewOutline.innerHTML = outline.length
-    ? outline.map((item) => `<li>${escapeHtml(item)}</li>`).join("")
+    ? outline.map((item) => `<li>${escapeHtml(shortDisplayText(item, 54))}</li>`).join("")
     : `<li>等待生成</li>`;
 }
 

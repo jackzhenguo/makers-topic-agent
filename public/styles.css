@@ -355,7 +355,7 @@ textarea:focus-visible {
   align-content: start;
   gap: 12px;
   min-height: 238px;
-  max-height: 460px;
+  max-height: 390px;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -395,7 +395,7 @@ textarea:focus-visible {
   padding: 12px 13px;
   color: var(--soft);
   font-size: 13px;
-  line-height: 1.65;
+  line-height: 1.58;
   box-shadow: var(--inner);
 }
 
@@ -412,10 +412,21 @@ textarea:focus-visible {
 }
 
 .chat-bubble h4 {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   margin: 0 0 6px;
   color: var(--text);
   font-size: 14px;
   line-height: 1.4;
+}
+
+.chat-bubble > div {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
 }
 
 .chat-bubble ul {
@@ -559,10 +570,19 @@ textarea:focus {
 }
 
 .recommended h3 {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   margin-top: 10px;
+  font-size: 20px;
 }
 
 .recommended p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   margin-top: 8px;
   color: var(--soft);
   line-height: 1.65;
@@ -576,8 +596,8 @@ textarea:focus {
 
 .topic-card {
   position: relative;
-  min-height: 132px;
-  max-height: 156px;
+  min-height: 124px;
+  max-height: 146px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -691,8 +711,12 @@ textarea:focus {
 }
 
 .phone-preview h3 {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
   padding: 18px 18px 0;
-  font-size: 22px;
+  font-size: 21px;
   line-height: 1.35;
 }
 
@@ -703,6 +727,10 @@ textarea:focus {
 }
 
 .preview-summary {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
   padding: 14px 18px 0;
   color: #35312b;
   line-height: 1.8;
@@ -724,6 +752,13 @@ textarea:focus {
   margin: 8px 0 0;
   padding-left: 20px;
   line-height: 1.75;
+}
+
+.preview-section li {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .raw-box {
