@@ -140,20 +140,18 @@ const SYSTEM_PROMPT = [
 const DEFAULT_USER_MESSAGE = "请基于 data 素材库，生成 5 个适合账号当前定位的高点击选题。";
 const SANDBOX_FILE_TOOL_HINTS = [
   "mcp__edgeone__files_list",
-  "mcp__edgeone__files_read",
-  "files_list",
-  "files_read"
+  "files_list"
 ];
-const FALLBACK_SANDBOX_FILE_TOOLS = ["mcp__edgeone__files_list", "mcp__edgeone__files_read"];
+const FALLBACK_SANDBOX_FILE_TOOLS = ["mcp__edgeone__files_list"];
 const SANDBOX_FILE_READ_INSTRUCTIONS = [
-  "Makers 沙箱素材读取要求：",
-  "在生成选题前，优先通过 Makers 文件工具读取项目素材，这是本次真实生成链路的一部分。",
-  "先调用文件列表工具列出当前目录，path 必须等于 \".\"。",
-  "如果列表中包含 data 目录，再调用文件列表工具列出 data，并调用文件读取工具读取 data/account.md、data/rules.md、data/recent-articles.json 和 data/hot-urls.json。",
-  "所有 path 参数都必须是相对路径，只能使用 .、data、data/account.md、data/rules.md、data/recent-articles.json、data/hot-urls.json。",
-  "禁止使用 /workspace、/home/user、/、..、绝对路径、环境变量、密钥路径或 shell 命令；也不要调用 commands 工具。",
-  "如果文件工具没有列出 data 目录，不要继续尝试读取缺失路径，直接使用 prompt 中已经注入的素材生成结果，且不要在最终回答里提到文件工具失败、prompt 注入、沙箱目录或 data 目录不存在。",
-  "读取后再结合这些素材、历史消息和今日热点生成选题。不要输出文件全文。"
+  "Makers sandbox tool requirement:",
+  "Call the EdgeOne file list tool exactly once before generating topics.",
+  "The only allowed tool call is files_list with path exactly equal to \".\".",
+  "Do not call files_list with path \"data\" or any other path.",
+  "Do not call files_read. The project materials are already injected in this prompt below.",
+  "Do not use /workspace, /home/user, /, .., absolute paths, environment variables, secret paths, or shell commands.",
+  "After the single files_list(\".\") call, continue with the injected account profile, content rules, hot URLs, recent articles, conversation memory, and today's hotspots.",
+  "Never mention sandbox directory layout, missing data directories, file tool failures, or prompt injection in the final answer."
 ].join("\n");
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const dataRootCandidates = [
@@ -1161,7 +1159,7 @@ async function runClaudeAgent(
     model: resolveClaudeAgentModel(env),
     systemPrompt,
     cwd,
-    maxTurns: edgeoneMcp ? 8 : 4,
+    maxTurns: edgeoneMcp ? 5 : 4,
     permissionMode: "bypassPermissions",
     settingSources: ["project"],
     tools: [],
