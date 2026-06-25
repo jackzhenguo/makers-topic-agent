@@ -2,9 +2,10 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  collectGatewayEnv,
+  collectClaudeAgentEnv,
   hasAnthropicCredentials,
   hasMakersCredentials,
+  resolveClaudeAgentModel,
   resolveMakersApiKey,
   resolveMakersBaseUrl,
   resolveModelName
@@ -479,7 +480,7 @@ async function runClaudeAgent(
   const cwd = edgeoneMcp ? await prepareSandboxDataFiles(kb) : process.cwd();
 
   const options: Record<string, unknown> = {
-    model: resolveModelName(env),
+    model: resolveClaudeAgentModel(env),
     systemPrompt: SYSTEM_PROMPT,
     cwd,
     maxTurns: 4,
@@ -487,7 +488,7 @@ async function runClaudeAgent(
     settingSources: ["project"],
     tools: [],
     allowedTools: [],
-    env: collectGatewayEnv(env)
+    env: collectClaudeAgentEnv(env)
   };
 
   const sessionStore =
@@ -593,7 +594,8 @@ export async function onRequest(context: AgentContext): Promise<Response> {
         ok: true,
         route: "/topic",
         mode: "claude-agent-sdk",
-        model: resolveModelName(env),
+        model: resolveClaudeAgentModel(env),
+        providerModel: resolveModelName(env),
         memory: memoryInfo(context, history),
         answer,
         dataFiles: ["data/account.md", "data/rules.md", "data/hot-urls.json", "data/recent-articles.json"]
