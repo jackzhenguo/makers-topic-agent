@@ -100,8 +100,12 @@ function shortText(value, length = 84) {
 
 function cleanDisplayText(value) {
   return readableText(value)
+    .replace(/\\n/g, " ")
+    .replace(/\\t/g, " ")
     .replace(/```[\s\S]*?```/g, "")
+    .replace(/\b(?:bash|shell|sh|powershell|json|typescript|javascript)\s+(?=[a-z0-9_-]+\s)/gi, "")
     .replace(/#{1,6}\s*/g, "")
+    .replace(/\*\*/g, "")
     .replace(/\b(message|gaps):\s*/gi, "")
     .replace(/好的，我已经尽力通过文件工具读取[^。]*。?/g, "")
     .replace(/但当前沙箱中 data 目录不存在[^。]*。?/g, "")
@@ -147,6 +151,10 @@ function recommendedAngle(parsed) {
     return topicAngle(recommendedTopicFromText(recommended, parsed?.topics));
   }
   return topicAngle(parsed?.topics?.[0]) || parsed?.summary || parsed?.reply || "";
+}
+
+function hasTopics(parsed) {
+  return Array.isArray(parsed?.topics) && parsed.topics.length > 0;
 }
 
 function sourceLabel(value) {
@@ -414,10 +422,11 @@ function toggleButton(label, onClick) {
 function renderResult(raw, options = {}) {
   state.lastRaw = raw;
   state.parsed = normalizeResponse(raw);
+  const topicResult = hasTopics(state.parsed);
   state.topicsExpanded = false;
   state.expandedTopics = new Set();
   els.rawOutput.textContent = JSON.stringify(raw, null, 2);
-  els.resultTitle.textContent = raw.mode === "local-fallback" ? "模型失败，已回退本地结果" : "已生成选题";
+  els.resultTitle.textContent = raw.mode === "local-fallback" ? "模型失败，已回退本地结果" : topicResult ? "已生成选题" : "已生成回复";
   els.requestStatus.textContent = `${raw.mode || "done"}${raw.model ? ` · ${raw.model}` : ""}`;
 
   renderRecommended();
@@ -455,9 +464,10 @@ function assistantSummary(parsed, raw) {
 
 function assistantChatMessage(parsed, raw) {
   const topics = parsed?.topics || [];
+  const topicResult = topics.length > 0;
   return {
     role: "assistant",
-    title: resultHeadline(parsed),
+    title: topicResult ? resultHeadline(parsed) : "继续追问",
     content: assistantSummary(parsed, raw),
     topics: topics.slice(0, 3).map((topic, index) => `Topic ${index + 1}: ${topicTitle(topic, index)}`),
     mode: raw?.mode || "done"
@@ -485,6 +495,15 @@ function renderChatThread() {
 }
 
 function renderRecommended() {
+  if (!hasTopics(state.parsed)) {
+    const reply = state.parsed?.reply || state.parsed?.summary || "";
+    els.recommendedCard.innerHTML = `
+      <span class="tag">本轮回复</span>
+      <h3>${escapeHtml(shortDisplayText(reply, 120) || "等待回复")}</h3>
+    `;
+    return;
+  }
+
   const title = recommendedTitle(state.parsed);
   const angle = recommendedAngle(state.parsed);
   els.recommendedCard.innerHTML = `
@@ -560,8 +579,12 @@ function firstTopic() {
 }
 
 function renderPreview(topic = firstTopic()) {
-  const title = topic ? topicTitle(topic, 0) : "选题生成后显示标题";
-  const summary = topicAngle(topic) || state.parsed?.summary || "这里会展示首推选题的切入角度、为什么现在写、以及文章结构。";
+  const title = topic ? topicTitle(topic, 0) : "本轮追问回复";
+  const summary =
+    topicAngle(topic) ||
+    state.parsed?.reply ||
+    state.parsed?.summary ||
+    "这里会展示首推选题的切入角度、为什么现在写、以及文章结构。";
   const outline = splitOutline(topic?.outline).slice(0, 5);
 
   els.phonePreview.querySelector("h3").textContent = shortDisplayText(title, 54);

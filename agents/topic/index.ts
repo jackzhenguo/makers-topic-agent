@@ -605,6 +605,7 @@ function buildClaudePrompt(
     "",
     "请始终输出 JSON，字段可包含 summary、reply、topics、recommended、missingData。",
     "summary 控制在 120 个中文字符以内，reply 控制在 220 个中文字符以内，不能使用 Markdown 标题，也不要复述工具调用、沙箱路径、文件读取失败等内部过程。",
+    "当用户说“喜欢话题 N”“继续展开”“展开大纲”“改得更适合某类读者”时，reply 应该输出面向公众号写作的标题、切入角度和文章结构，不要输出 shell 命令、代码块或工具调用示例，除非用户明确要求给代码/命令。",
     "missingData 只能是简短字符串或字符串数组；如果素材缺口不影响首发，留空字符串。不要返回 { message, gaps } 这类对象。",
     "如果用户是在继续追问、要求解释、改写、展开某个 Topic、比较两个选题或基于上一轮做调整，请优先在 reply 中直接回答，不要强行重新生成 5 个新选题；可按需返回更新后的 topics。",
     "只有当用户明确要求生成、重新生成或补充选题列表时，topics 至少 5 条，每条包含 title、angle、whyNow、outline、sourceUrl。recommended 必须是 topics 中最适合首发的一条完整对象，并且只使用 title、angle、whyNow、outline、sourceUrl 等选题字段。"
