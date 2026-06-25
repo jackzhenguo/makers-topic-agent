@@ -594,7 +594,9 @@ function buildClaudePrompt(
     "最近三篇文章 JSON：",
     JSON.stringify(kb.recentArticles, null, 2),
     "",
-    "请输出 JSON，字段包含 summary、topics、recommended、missingData。topics 至少 5 条，每条包含 title、angle、whyNow、outline、sourceUrl。recommended 必须是 topics 中最适合首发的一条完整对象，不要留空。"
+    "请始终输出 JSON，字段可包含 summary、reply、topics、recommended、missingData。",
+    "如果用户是在继续追问、要求解释、改写、展开某个 Topic、比较两个选题或基于上一轮做调整，请优先在 reply 中直接回答，不要强行重新生成 5 个新选题；可按需返回更新后的 topics。",
+    "只有当用户明确要求生成、重新生成或补充选题列表时，topics 至少 5 条，每条包含 title、angle、whyNow、outline、sourceUrl。recommended 必须是 topics 中最适合首发的一条完整对象。"
   ].join("\n");
 }
 

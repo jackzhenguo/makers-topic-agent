@@ -2,15 +2,20 @@ const state = {
   materials: null,
   materialsSource: "",
   history: [],
+  messages: [],
   hotExpanded: false,
   topicsExpanded: false,
+  expandedTopics: new Set(),
   mode: "model",
   lastRaw: null,
   parsed: null
 };
 const conversationKey = "makers-topic-agent.conversation-id";
 const historyKey = "makers-topic-agent.history";
+const messagesKey = "makers-topic-agent.messages";
 const conversationIdPattern = /^[0-9A-Za-z_.-]{6,36}$/;
+const topicPreviewCount = 2;
+const defaultPrompt = "结合最近三篇文章和今日 AI 热点，生成 5 个适合公众号的高点击选题，避免和最近文章重复。";
 
 const els = {
   modeLabel: document.querySelector("#modeLabel"),
@@ -52,8 +57,44 @@ function setMode(mode) {
   els.runtimeHint.textContent = mode === "model" ? "真实模型可能需要 30-120 秒" : "本地模式即时返回";
 }
 
+function readableText(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(readableText).filter(Boolean).join(" ");
+
+  if (typeof value === "object") {
+    const objectValue = value;
+    const preferred = [
+      objectValue.title,
+      objectValue.angle,
+      objectValue.whyNow,
+      objectValue.summary,
+      objectValue.reason,
+      objectValue.recommendation,
+      objectValue.reply,
+      objectValue.content,
+      objectValue.text
+    ]
+      .map(readableText)
+      .filter(Boolean);
+
+    if (preferred.length) return preferred.join("。");
+
+    return Object.entries(objectValue)
+      .map(([key, item]) => {
+        const text = readableText(item);
+        return text ? `${key}: ${text}` : "";
+      })
+      .filter(Boolean)
+      .join(" ");
+  }
+
+  return String(value);
+}
+
 function shortText(value, length = 84) {
-  const text = String(value || "").replace(/\s+/g, " ").trim();
+  const text = readableText(value).replace(/\s+/g, " ").trim();
   return text.length > length ? `${text.slice(0, length)}...` : text;
 }
 
@@ -89,8 +130,8 @@ function escapeHtml(value) {
 }
 
 function splitOutline(outline) {
-  if (Array.isArray(outline)) return outline.filter(Boolean).map(String);
-  return String(outline || "")
+  if (Array.isArray(outline)) return outline.filter(Boolean).map(readableText);
+  return readableText(outline)
     .split(/\n|\d+\.\s+/)
     .map((item) => item.replace(/^[-*]\s*/, "").trim())
     .filter(Boolean)
@@ -114,6 +155,52 @@ function loadHistory() {
     state.history = [];
   }
   renderHistory();
+}
+
+function loadChatMessages() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(messagesKey) || "[]");
+    state.messages = Array.isArray(parsed) ? parsed.slice(-30) : [];
+  } catch {
+    state.messages = [];
+  }
+
+  if (!state.messages.length) {
+    state.messages = [
+      {
+        id: "welcome",
+        role: "assistant",
+        title: "今天想追哪条 AI 热点？",
+        content: "我会结合左侧今日热点、最近文章和账号规则，生成适合公众号的选题方案。生成后可以继续追问，比如“把 Topic 2 改得更适合开发者”。",
+        mode: "ready"
+      }
+    ];
+  }
+
+  renderChatThread();
+}
+
+function saveChatMessages() {
+  const messages = state.messages.filter((item) => item.id !== "welcome").slice(-30);
+  localStorage.setItem(messagesKey, JSON.stringify(messages));
+}
+
+function appendChatMessage(message) {
+  const item = {
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: Date.now(),
+    ...message
+  };
+  state.messages.push(item);
+  saveChatMessages();
+  renderChatThread();
+  return item.id;
+}
+
+function replaceChatMessage(id, nextMessage) {
+  state.messages = state.messages.map((item) => (item.id === id ? { ...item, ...nextMessage } : item));
+  saveChatMessages();
+  renderChatThread();
 }
 
 function saveHistoryEntry(entry) {
@@ -151,7 +238,7 @@ function renderHistory() {
     `;
     btn.addEventListener("click", () => {
       els.promptInput.value = item.message || els.promptInput.value;
-      renderResult(item.raw, { skipHistory: true });
+      renderResult(item.raw, { skipHistory: true, updateChat: false });
     });
     els.historyList.appendChild(btn);
   });
@@ -176,7 +263,8 @@ function normalizeResponse(raw) {
       const topics = parsed.topics || parsed.candidates || [];
       const recommended = parsed.recommended || parsed.recommendation || parsed.bestTopic || topics[0] || "";
       return {
-        summary: parsed.summary || raw.answer,
+        summary: parsed.summary || parsed.reply || raw.answer,
+        reply: parsed.reply || parsed.response || parsed.message || "",
         topics,
         recommended,
         missingData: parsed.missingData || ""
@@ -184,8 +272,9 @@ function normalizeResponse(raw) {
     } catch {
       return {
         summary: raw.answer,
+        reply: raw.answer,
         topics: [],
-        recommended: raw.answer,
+        recommended: "",
         missingData: ""
       };
     }
@@ -194,7 +283,8 @@ function normalizeResponse(raw) {
   const result = raw?.result || {};
   const topics = result.candidates || result.topics || [];
   return {
-    summary: result.recommended?.title || topics[0]?.title || "本地模式已生成选题",
+    summary: result.reply || result.recommended?.title || topics[0]?.title || "本地模式已生成选题",
+    reply: result.reply || result.answer || "",
     topics,
     recommended: result.recommended || topics[0] || "",
     missingData: (result.nextDataActions || []).join("\n")
@@ -277,6 +367,7 @@ function renderResult(raw, options = {}) {
   state.lastRaw = raw;
   state.parsed = normalizeResponse(raw);
   state.topicsExpanded = false;
+  state.expandedTopics = new Set();
   els.rawOutput.textContent = JSON.stringify(raw, null, 2);
   els.resultTitle.textContent = raw.mode === "local-fallback" ? "模型失败，已回退本地结果" : "已生成选题";
   els.requestStatus.textContent = `${raw.mode || "done"}${raw.model ? ` · ${raw.model}` : ""}`;
@@ -284,59 +375,50 @@ function renderResult(raw, options = {}) {
   renderRecommended();
   renderTopics();
   renderPreview();
-  renderChat(els.promptInput.value.trim(), state.parsed, raw);
+
+  if (options.pendingId) {
+    replaceChatMessage(options.pendingId, assistantChatMessage(state.parsed, raw));
+  }
 
   if (!options.skipHistory) {
     saveHistoryEntry({
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       createdAt: Date.now(),
-      message: els.promptInput.value.trim(),
+      message: options.message || els.promptInput.value.trim(),
       title: resultHeadline(state.parsed),
       raw
     });
   }
 }
 
-function renderChat(message, parsed, raw) {
+function assistantChatMessage(parsed, raw) {
   const topics = parsed?.topics || [];
-  const recommendedTitle = resultHeadline(parsed);
-  const mode = raw?.mode || "done";
-
-  els.chatThread.innerHTML = `
-    <div class="chat-message user">
-      <div class="chat-role">You</div>
-      <div class="chat-bubble">${escapeHtml(message || "生成今日公众号选题")}</div>
-    </div>
-    <div class="chat-message assistant">
-      <div class="chat-role">Agent · ${escapeHtml(mode)}</div>
-      <div class="chat-bubble">
-        <h4>${escapeHtml(recommendedTitle)}</h4>
-        <div>${escapeHtml(shortText(parsed?.summary || "", 220))}</div>
-        ${
-          topics.length
-            ? `<ul>${topics
-                .slice(0, 5)
-                .map((topic, index) => `<li>${escapeHtml(`Topic ${index + 1}: ${topicTitle(topic, index)}`)}</li>`)
-                .join("")}</ul>`
-            : ""
-        }
-      </div>
-    </div>
-  `;
-  els.chatThread.scrollTop = els.chatThread.scrollHeight;
+  return {
+    role: "assistant",
+    title: resultHeadline(parsed),
+    content: parsed?.reply || parsed?.summary || raw?.answer || "已生成回复。",
+    topics: topics.slice(0, 5).map((topic, index) => `Topic ${index + 1}: ${topicTitle(topic, index)}`),
+    mode: raw?.mode || "done"
+  };
 }
 
-function renderPendingChat(message) {
-  els.chatThread.innerHTML = `
-    <div class="chat-message user">
-      <div class="chat-role">You</div>
-      <div class="chat-bubble">${escapeHtml(message || "生成今日公众号选题")}</div>
-    </div>
-    <div class="chat-message assistant">
-      <div class="chat-role">Agent</div>
-      <div class="chat-bubble">正在读取今日热点、分析账号风格并生成选题...</div>
-    </div>
-  `;
+function renderChatThread() {
+  els.chatThread.innerHTML = state.messages
+    .map((message) => {
+      const roleLabel = message.role === "user" ? "You" : `Agent${message.mode ? ` · ${message.mode}` : ""}`;
+      const topics = Array.isArray(message.topics) ? message.topics : [];
+      return `
+        <div class="chat-message ${message.role === "user" ? "user" : "assistant"}">
+          <div class="chat-role">${escapeHtml(roleLabel)}</div>
+          <div class="chat-bubble">
+            ${message.title ? `<h4>${escapeHtml(shortText(message.title, 96))}</h4>` : ""}
+            <div>${escapeHtml(shortText(message.content || "", message.role === "user" ? 360 : 460))}</div>
+            ${topics.length ? `<ul>${topics.map((topic) => `<li>${escapeHtml(shortText(topic, 110))}</li>`).join("")}</ul>` : ""}
+          </div>
+        </div>
+      `;
+    })
+    .join("");
   els.chatThread.scrollTop = els.chatThread.scrollHeight;
 }
 
@@ -345,11 +427,14 @@ function renderRecommended() {
   const text =
     typeof recommended === "string"
       ? recommended
-      : [recommended.title, recommended.angle || recommended.whyNow].filter(Boolean).join("。");
+      : [recommended.title, recommended.angle || recommended.whyNow || recommended.summary]
+          .map(readableText)
+          .filter(Boolean)
+          .join("。");
   els.recommendedCard.innerHTML = `
     <span class="tag">推荐首发</span>
-    <h3>${escapeHtml(shortText(text, 140) || "未返回推荐")}</h3>
-    ${state.parsed?.missingData ? `<p>${escapeHtml(shortText(state.parsed.missingData, 260))}</p>` : ""}
+    <h3>${escapeHtml(shortText(text || state.parsed?.reply || state.parsed?.summary, 120) || "等待推荐")}</h3>
+    ${state.parsed?.missingData ? `<p>${escapeHtml(shortText(state.parsed.missingData, 220))}</p>` : ""}
   `;
 }
 
@@ -359,35 +444,54 @@ function topicTitle(topic, index) {
 
 function renderTopics() {
   const topics = state.parsed?.topics || [];
-  const visibleTopics = state.topicsExpanded ? topics : topics.slice(0, 3);
+  const visibleTopics = state.topicsExpanded ? topics : topics.slice(0, topicPreviewCount);
   els.topicGrid.innerHTML = "";
 
   if (!topics.length) {
-    els.topicGrid.innerHTML = `<div class="empty-state">模型返回未解析成 topic 列表，可在原始返回里查看。</div>`;
+    els.topicGrid.innerHTML = `<div class="empty-state">${escapeHtml(shortText(state.parsed?.reply || state.parsed?.summary || "这轮是普通对话，没有新的 topic 列表。", 180))}</div>`;
     return;
   }
 
   visibleTopics.forEach((topic, index) => {
-    const outline = splitOutline(topic.outline).slice(0, 5);
+    const expanded = state.expandedTopics.has(index);
+    const outline = expanded ? splitOutline(topic.outline).slice(0, 5) : [];
+    const topicBody = topic.angle || topic.whyNow || topic.summary || "";
     const card = document.createElement("article");
-    card.className = "topic-card";
+    card.className = `topic-card${expanded ? " expanded" : ""}`;
+    card.tabIndex = 0;
     card.innerHTML = `
       <span class="tag">Topic ${index + 1}</span>
-      <h3>${escapeHtml(topicTitle(topic, index))}</h3>
-      <p>${escapeHtml(topic.angle || topic.whyNow || topic.summary || "")}</p>
+      <h3>${escapeHtml(shortText(topicTitle(topic, index), expanded ? 120 : 54))}</h3>
+      <p>${escapeHtml(shortText(topicBody, expanded ? 420 : 92))}</p>
       ${outline.length ? `<ul>${outline.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}
       <div class="topic-meta">
         ${(topic.tags || []).slice(0, 4).map((tag) => `<span>${escapeHtml(tag)}</span>`).join("")}
       </div>
+      <button class="topic-expand" type="button">${expanded ? "收起" : "展开"}</button>
     `;
-    card.addEventListener("click", () => renderPreview(topic));
+    const toggleCard = () => {
+      if (expanded) {
+        state.expandedTopics.delete(index);
+      } else {
+        state.expandedTopics.add(index);
+      }
+      renderPreview(topic);
+      renderTopics();
+    };
+    card.addEventListener("click", toggleCard);
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleCard();
+      }
+    });
     els.topicGrid.appendChild(card);
   });
 
-  if (topics.length > 3) {
+  if (topics.length > topicPreviewCount) {
     const wrapper = document.createElement("div");
     wrapper.className = "topic-toggle-wrap";
-    wrapper.appendChild(toggleButton(state.topicsExpanded ? "收起选题" : `展开全部 ${topics.length} 个选题`, () => {
+    wrapper.appendChild(toggleButton(state.topicsExpanded ? "只看前 2 个选题" : `显示全部 ${topics.length} 个选题`, () => {
       state.topicsExpanded = !state.topicsExpanded;
       renderTopics();
     }));
@@ -412,10 +516,25 @@ function renderPreview(topic = firstTopic()) {
 }
 
 async function generate() {
-  const message = els.promptInput.value.trim();
+  const typedMessage = els.promptInput.value.trim();
+  const isOnlyWelcome = state.messages.length === 1 && state.messages[0]?.id === "welcome";
+  const message = typedMessage || (isOnlyWelcome ? defaultPrompt : "");
+  if (!message) {
+    els.requestStatus.textContent = "请输入追问内容";
+    els.promptInput.focus();
+    return;
+  }
+
   els.generateBtn.disabled = true;
   els.requestStatus.textContent = state.mode === "model" ? "DeepSeek 生成中" : "Local 生成中";
-  renderPendingChat(message);
+  if (isOnlyWelcome) state.messages = [];
+  appendChatMessage({ role: "user", content: message });
+  const pendingId = appendChatMessage({
+    role: "assistant",
+    content: "正在读取今日热点、分析账号风格，并结合当前对话生成回复...",
+    mode: "working"
+  });
+  els.promptInput.value = "";
 
   try {
     const res = await fetch("/topic", {
@@ -431,10 +550,16 @@ async function generate() {
       })
     });
     const data = await res.json();
-    renderResult(data);
+    renderResult(data, { message, pendingId });
   } catch (error) {
     els.requestStatus.textContent = "Error";
     els.rawOutput.textContent = error.message;
+    replaceChatMessage(pendingId, {
+      role: "assistant",
+      title: "请求失败",
+      content: error.message,
+      mode: "error"
+    });
   } finally {
     els.generateBtn.disabled = false;
   }
@@ -472,15 +597,11 @@ els.downloadBtn.addEventListener("click", downloadResult);
 setMode("model");
 initIcons();
 loadHistory();
-els.chatThread.innerHTML = `
-  <div class="chat-message assistant">
-    <div class="chat-role">Agent</div>
-    <div class="chat-bubble">
-      <h4>今天想追哪条 AI 热点？</h4>
-      <div>我会结合左侧今日热点、最近文章和账号规则，生成适合公众号的选题方案。</div>
-    </div>
-  </div>
-`;
+loadChatMessages();
+els.promptInput.placeholder = "继续追问，例如：把 Topic 2 改得更适合开发者，或者展开第一个选题的大纲。";
+if (state.messages.some((item) => item.id !== "welcome")) {
+  els.promptInput.value = "";
+}
 loadMaterials().catch((error) => {
   els.materialLabel.textContent = "素材读取失败";
   els.rawOutput.textContent = error.message;

@@ -198,6 +198,8 @@ h3 {
 .segment:focus-visible,
 .list-toggle:focus-visible,
 .history-item:focus-visible,
+.topic-card:focus-visible,
+.topic-expand:focus-visible,
 textarea:focus-visible {
   outline: 2px solid rgba(128, 217, 210, 0.54);
   outline-offset: 2px;
@@ -353,7 +355,7 @@ textarea:focus-visible {
   align-content: start;
   gap: 12px;
   min-height: 238px;
-  max-height: 380px;
+  max-height: 460px;
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -573,14 +575,24 @@ textarea:focus {
 }
 
 .topic-card {
-  min-height: 220px;
+  position: relative;
+  min-height: 132px;
+  max-height: 156px;
+  overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 8px;
-  padding: 14px;
+  padding: 13px 14px 42px;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.012)),
     rgba(255, 255, 255, 0.02);
+  cursor: pointer;
   transition: border-color 0.16s ease, background 0.16s ease, transform 0.16s ease;
+}
+
+.topic-card.expanded {
+  min-height: 220px;
+  max-height: none;
+  overflow: visible;
 }
 
 .topic-card:hover {
@@ -591,13 +603,30 @@ textarea:focus {
 
 .topic-card h3 {
   margin-top: 10px;
+  font-size: 17px;
+  line-height: 1.42;
+}
+
+.topic-card:not(.expanded) h3,
+.topic-card:not(.expanded) p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+}
+
+.topic-card:not(.expanded) h3 {
+  -webkit-line-clamp: 2;
 }
 
 .topic-card p {
-  margin-top: 10px;
+  margin-top: 8px;
   color: var(--soft);
-  font-size: 14px;
-  line-height: 1.7;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.topic-card:not(.expanded) p {
+  -webkit-line-clamp: 2;
 }
 
 .topic-card ul {
@@ -621,6 +650,23 @@ textarea:focus {
   padding: 4px 8px;
   color: #c9f8f3;
   font-size: 12px;
+}
+
+.topic-card:not(.expanded) .topic-meta {
+  display: none;
+}
+
+.topic-expand {
+  position: absolute;
+  right: 12px;
+  bottom: 11px;
+  border: 1px solid rgba(128, 217, 210, 0.22);
+  border-radius: 999px;
+  padding: 3px 9px;
+  background: rgba(128, 217, 210, 0.07);
+  color: #c9f8f3;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .topic-toggle-wrap {
