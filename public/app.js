@@ -424,7 +424,11 @@ async function generate() {
         "Content-Type": "application/json",
         "Makers-Conversation-Id": getConversationId()
       },
-      body: JSON.stringify({ message, local: state.mode === "local" })
+      body: JSON.stringify({
+        message,
+        local: state.mode === "local",
+        sandboxTools: state.mode === "model"
+      })
     });
     const data = await res.json();
     renderResult(data);

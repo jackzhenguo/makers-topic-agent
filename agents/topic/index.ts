@@ -123,6 +123,20 @@ const SYSTEM_PROMPT = [
 ].join("\n");
 
 const DEFAULT_USER_MESSAGE = "请基于 data 素材库，生成 5 个适合账号当前定位的高点击选题。";
+const SANDBOX_FILE_TOOL_HINTS = [
+  "mcp__edgeone__files_list",
+  "mcp__edgeone__files_read",
+  "files_list",
+  "files_read"
+];
+const SANDBOX_FILE_READ_INSTRUCTIONS = [
+  "Makers 沙箱素材读取要求：",
+  "在生成选题前，必须通过 Makers 文件工具读取项目素材，这是本次真实生成链路的一部分。",
+  "先调用文件列表工具列出 data 目录，再调用文件读取工具读取 data/account.md、data/rules.md、data/recent-articles.json 和 data/hot-urls.json。",
+  "所有 path 参数都必须是相对路径，只能使用 data、data/account.md、data/rules.md、data/recent-articles.json、data/hot-urls.json。",
+  "禁止使用 /workspace、/、..、绝对路径、环境变量、密钥路径或 shell 命令。",
+  "读取后再结合这些素材、历史消息和今日热点生成选题。不要输出文件全文。"
+].join("\n");
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const dataRootCandidates = [
   process.cwd(),
@@ -553,12 +567,18 @@ async function scoreHotspots(context: AgentContext, kb: KnowledgeBase): Promise<
   });
 }
 
-function buildClaudePrompt(message: string, kb: KnowledgeBase, history: ConversationMessage[] = []): string {
+function buildClaudePrompt(
+  message: string,
+  kb: KnowledgeBase,
+  history: ConversationMessage[] = [],
+  requireSandboxFileReads = false
+): string {
   const historyText = formatConversationHistory(history);
 
   return [
     `用户请求：${message}`,
     "",
+    ...(requireSandboxFileReads ? [SANDBOX_FILE_READ_INSTRUCTIONS, ""] : []),
     "同一 conversation 的历史消息：",
     historyText || "(当前没有历史消息，或本地运行时未注入 context.store)",
     "",
@@ -576,6 +596,16 @@ function buildClaudePrompt(message: string, kb: KnowledgeBase, history: Conversa
     "",
     "请输出 JSON，字段包含 summary、topics、recommended、missingData。topics 至少 5 条，每条包含 title、angle、whyNow、outline、sourceUrl。recommended 必须是 topics 中最适合首发的一条完整对象，不要留空。"
   ].join("\n");
+}
+
+function filterAllowedTools(allowedTools: string[] = [], hints: string[] = []): string[] {
+  if (!hints.length) return allowedTools;
+
+  const matched = allowedTools.filter((tool) =>
+    hints.some((hint) => tool === hint || tool.endsWith(hint) || tool.includes(hint))
+  );
+
+  return matched.length ? matched : allowedTools;
 }
 
 interface MakersChatResponse {
@@ -682,15 +712,18 @@ async function runClaudeAgent(
 ): Promise<string> {
   const sdk = await import("@anthropic-ai/claude-agent-sdk");
   const env = context.env ?? process.env;
-  const prompt = buildClaudePrompt(message, kb, history);
-  const edgeoneMcp = enableSandboxTools ? context.tools?.toClaudeMcpServer?.() : undefined;
+  const candidateMcp = enableSandboxTools ? context.tools?.toClaudeMcpServer?.() : undefined;
+  const allowedFileTools = filterAllowedTools(candidateMcp?.allowedTools ?? [], SANDBOX_FILE_TOOL_HINTS);
+  const edgeoneMcp = candidateMcp && allowedFileTools.length > 0 ? candidateMcp : undefined;
+  const prompt = buildClaudePrompt(message, kb, history, Boolean(edgeoneMcp));
   const cwd = edgeoneMcp ? await prepareSandboxDataFiles(kb) : process.cwd();
+  const systemPrompt = edgeoneMcp ? `${SYSTEM_PROMPT}\n\n${SANDBOX_FILE_READ_INSTRUCTIONS}` : SYSTEM_PROMPT;
 
   const options: Record<string, unknown> = {
     model: resolveClaudeAgentModel(env),
-    systemPrompt: SYSTEM_PROMPT,
+    systemPrompt,
     cwd,
-    maxTurns: 4,
+    maxTurns: edgeoneMcp ? 8 : 4,
     permissionMode: "bypassPermissions",
     settingSources: ["project"],
     tools: [],
@@ -715,7 +748,7 @@ async function runClaudeAgent(
         alwaysLoad: true
       })
     };
-    options.allowedTools = edgeoneMcp.allowedTools ?? [];
+    options.allowedTools = allowedFileTools;
   }
 
   let assistantText = "";
@@ -793,10 +826,12 @@ export async function onRequest(context: AgentContext): Promise<Response> {
   await scoreHotspots(context, kb);
 
   const forceLocal = body.local === true || body.useLocal === true;
-  const enableSandboxTools = body.sandboxTools === true;
+  const enableSandboxTools = body.sandboxTools !== false;
   const env = context.env ?? process.env;
+  const shouldUseClaudeAgent =
+    !forceLocal && hasAnthropicCredentials(env) && (enableSandboxTools || !hasMakersCredentials(env));
 
-  if (!forceLocal && hasMakersCredentials(env)) {
+  if (!forceLocal && hasMakersCredentials(env) && !shouldUseClaudeAgent) {
     try {
       const answer = await withSpan(
         context,
@@ -834,7 +869,7 @@ export async function onRequest(context: AgentContext): Promise<Response> {
     }
   }
 
-  if (!forceLocal && hasAnthropicCredentials(env)) {
+  if (shouldUseClaudeAgent) {
     try {
       const answer = await withSpan(
         context,
