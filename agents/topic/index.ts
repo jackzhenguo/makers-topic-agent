@@ -574,7 +574,7 @@ function buildClaudePrompt(message: string, kb: KnowledgeBase, history: Conversa
     "最近三篇文章 JSON：",
     JSON.stringify(kb.recentArticles, null, 2),
     "",
-    "请输出 JSON，字段包含 summary、topics、recommended、missingData。topics 至少 5 条，每条包含 title、angle、whyNow、outline、sourceUrl。"
+    "请输出 JSON，字段包含 summary、topics、recommended、missingData。topics 至少 5 条，每条包含 title、angle、whyNow、outline、sourceUrl。recommended 必须是 topics 中最适合首发的一条完整对象，不要留空。"
   ].join("\n");
 }
 

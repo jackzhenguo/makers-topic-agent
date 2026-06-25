@@ -100,10 +100,12 @@ function normalizeResponse(raw) {
   if (raw?.answer) {
     try {
       const parsed = extractJsonFromAnswer(raw.answer);
+      const topics = parsed.topics || parsed.candidates || [];
+      const recommended = parsed.recommended || parsed.recommendation || parsed.bestTopic || topics[0] || "";
       return {
         summary: parsed.summary || raw.answer,
-        topics: parsed.topics || [],
-        recommended: parsed.recommended || "",
+        topics,
+        recommended,
         missingData: parsed.missingData || ""
       };
     } catch {
@@ -117,10 +119,11 @@ function normalizeResponse(raw) {
   }
 
   const result = raw?.result || {};
+  const topics = result.candidates || result.topics || [];
   return {
-    summary: result.recommended?.title || "本地模式已生成选题",
-    topics: result.candidates || [],
-    recommended: result.recommended?.title || "",
+    summary: result.recommended?.title || topics[0]?.title || "本地模式已生成选题",
+    topics,
+    recommended: result.recommended || topics[0] || "",
     missingData: (result.nextDataActions || []).join("\n")
   };
 }
@@ -193,7 +196,10 @@ function renderResult(raw) {
 
 function renderRecommended() {
   const recommended = state.parsed?.recommended || "";
-  const text = typeof recommended === "string" ? recommended : JSON.stringify(recommended);
+  const text =
+    typeof recommended === "string"
+      ? recommended
+      : [recommended.title, recommended.angle || recommended.whyNow].filter(Boolean).join("。");
   els.recommendedCard.innerHTML = `
     <span class="tag">推荐首发</span>
     <h3>${escapeHtml(shortText(text, 140) || "未返回推荐")}</h3>
