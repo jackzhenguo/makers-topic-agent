@@ -2,6 +2,8 @@ const state = {
   materials: null,
   materialsSource: "",
   history: [],
+  hotExpanded: false,
+  topicsExpanded: false,
   mode: "model",
   lastRaw: null,
   parsed: null
@@ -53,6 +55,17 @@ function setMode(mode) {
 function shortText(value, length = 84) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text.length > length ? `${text.slice(0, length)}...` : text;
+}
+
+function sourceLabel(value) {
+  if (!value) return "素材库";
+  try {
+    const url = new URL(value);
+    if (url.hostname === "zglg.work") return "今日 AI 快讯";
+    return url.hostname;
+  } catch {
+    return value;
+  }
 }
 
 function sourceItem(title, detail, meta = "") {
@@ -232,21 +245,38 @@ async function loadMaterials() {
 function renderMaterials() {
   const hotUrls = state.materials?.hotUrls || [];
   const articles = state.materials?.recentArticles || [];
+  const visibleHotUrls = state.hotExpanded ? hotUrls : hotUrls.slice(0, 3);
   els.hotCount.textContent = hotUrls.length;
   els.articleCount.textContent = articles.length;
-  els.materialLabel.textContent = `${hotUrls.length} 热点 · ${articles.length} 文章 · ${state.materialsSource || "素材库"}`;
+  els.materialLabel.textContent = `${hotUrls.length} 热点 · ${articles.length} 文章 · ${sourceLabel(state.materialsSource)}`;
   els.hotList.innerHTML = "";
   els.articleList.innerHTML = "";
 
-  hotUrls.forEach((item) =>
+  visibleHotUrls.forEach((item) =>
     els.hotList.appendChild(sourceItem(item.title, shortText(item.note, 70), (item.tags || [])[0] || item.date || "热点"))
   );
+  if (hotUrls.length > 3) {
+    els.hotList.appendChild(toggleButton(state.hotExpanded ? "收起热点" : `展开 ${hotUrls.length - 3} 条热点`, () => {
+      state.hotExpanded = !state.hotExpanded;
+      renderMaterials();
+    }));
+  }
   articles.forEach((item) => els.articleList.appendChild(sourceItem(item.title, shortText(item.summary, 70), "文章")));
+}
+
+function toggleButton(label, onClick) {
+  const button = document.createElement("button");
+  button.className = "list-toggle";
+  button.type = "button";
+  button.textContent = label;
+  button.addEventListener("click", onClick);
+  return button;
 }
 
 function renderResult(raw, options = {}) {
   state.lastRaw = raw;
   state.parsed = normalizeResponse(raw);
+  state.topicsExpanded = false;
   els.rawOutput.textContent = JSON.stringify(raw, null, 2);
   els.resultTitle.textContent = raw.mode === "local-fallback" ? "模型失败，已回退本地结果" : "已生成选题";
   els.requestStatus.textContent = `${raw.mode || "done"}${raw.model ? ` · ${raw.model}` : ""}`;
@@ -329,6 +359,7 @@ function topicTitle(topic, index) {
 
 function renderTopics() {
   const topics = state.parsed?.topics || [];
+  const visibleTopics = state.topicsExpanded ? topics : topics.slice(0, 3);
   els.topicGrid.innerHTML = "";
 
   if (!topics.length) {
@@ -336,7 +367,7 @@ function renderTopics() {
     return;
   }
 
-  topics.forEach((topic, index) => {
+  visibleTopics.forEach((topic, index) => {
     const outline = splitOutline(topic.outline).slice(0, 5);
     const card = document.createElement("article");
     card.className = "topic-card";
@@ -352,6 +383,16 @@ function renderTopics() {
     card.addEventListener("click", () => renderPreview(topic));
     els.topicGrid.appendChild(card);
   });
+
+  if (topics.length > 3) {
+    const wrapper = document.createElement("div");
+    wrapper.className = "topic-toggle-wrap";
+    wrapper.appendChild(toggleButton(state.topicsExpanded ? "收起选题" : `展开全部 ${topics.length} 个选题`, () => {
+      state.topicsExpanded = !state.topicsExpanded;
+      renderTopics();
+    }));
+    els.topicGrid.appendChild(wrapper);
+  }
 }
 
 function firstTopic() {
