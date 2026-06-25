@@ -143,6 +143,7 @@ const SANDBOX_FILE_READ_INSTRUCTIONS = [
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const dataRootCandidates = [
   process.cwd(),
+  path.resolve(moduleDir, ".."),
   path.resolve(moduleDir, "..", ".."),
   path.resolve(process.cwd(), "..")
 ];
