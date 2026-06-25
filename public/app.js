@@ -1,11 +1,13 @@
 const state = {
   materials: null,
   materialsSource: "",
+  history: [],
   mode: "model",
   lastRaw: null,
   parsed: null
 };
 const conversationKey = "makers-topic-agent.conversation-id";
+const historyKey = "makers-topic-agent.history";
 const conversationIdPattern = /^[0-9A-Za-z_.-]{6,36}$/;
 
 const els = {
@@ -15,7 +17,10 @@ const els = {
   articleCount: document.querySelector("#articleCount"),
   hotList: document.querySelector("#hotList"),
   articleList: document.querySelector("#articleList"),
+  historyCount: document.querySelector("#historyCount"),
+  historyList: document.querySelector("#historyList"),
   refreshBtn: document.querySelector("#refreshBtn"),
+  chatThread: document.querySelector("#chatThread"),
   promptInput: document.querySelector("#promptInput"),
   modelModeBtn: document.querySelector("#modelModeBtn"),
   localModeBtn: document.querySelector("#localModeBtn"),
@@ -50,10 +55,14 @@ function shortText(value, length = 84) {
   return text.length > length ? `${text.slice(0, length)}...` : text;
 }
 
-function sourceItem(title, detail) {
+function sourceItem(title, detail, meta = "") {
   const div = document.createElement("div");
   div.className = "source-item";
-  div.innerHTML = `<strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail || "")}</span>`;
+  div.innerHTML = `
+    ${meta ? `<small>${escapeHtml(meta)}</small>` : ""}
+    <strong>${escapeHtml(title)}</strong>
+    <span>${escapeHtml(detail || "")}</span>
+  `;
   return div;
 }
 
@@ -82,6 +91,57 @@ function getConversationId() {
   const id = window.crypto?.randomUUID?.() || `chat-${Math.random().toString(36).slice(2, 14)}`;
   localStorage.setItem(conversationKey, id);
   return id;
+}
+
+function loadHistory() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(historyKey) || "[]");
+    state.history = Array.isArray(parsed) ? parsed.slice(0, 20) : [];
+  } catch {
+    state.history = [];
+  }
+  renderHistory();
+}
+
+function saveHistoryEntry(entry) {
+  state.history = [entry, ...state.history.filter((item) => item.id !== entry.id)].slice(0, 20);
+  localStorage.setItem(historyKey, JSON.stringify(state.history));
+  renderHistory();
+}
+
+function resultHeadline(parsed) {
+  const recommended = parsed?.recommended;
+  if (recommended && typeof recommended === "object" && recommended.title) return recommended.title;
+  if (typeof recommended === "string" && recommended.trim()) return recommended.trim();
+  return parsed?.topics?.[0]?.title || parsed?.summary || "已生成选题";
+}
+
+function renderHistory() {
+  els.historyCount.textContent = state.history.length;
+  els.historyList.innerHTML = "";
+
+  if (!state.history.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-state";
+    empty.textContent = "暂无历史";
+    els.historyList.appendChild(empty);
+    return;
+  }
+
+  state.history.forEach((item) => {
+    const btn = document.createElement("button");
+    btn.className = "history-item";
+    btn.type = "button";
+    btn.innerHTML = `
+      <strong>${escapeHtml(item.title || item.message || "历史请求")}</strong>
+      <span>${escapeHtml(new Date(item.createdAt).toLocaleString())}</span>
+    `;
+    btn.addEventListener("click", () => {
+      els.promptInput.value = item.message || els.promptInput.value;
+      renderResult(item.raw, { skipHistory: true });
+    });
+    els.historyList.appendChild(btn);
+  });
 }
 
 function extractJsonFromAnswer(answer) {
@@ -178,11 +238,13 @@ function renderMaterials() {
   els.hotList.innerHTML = "";
   els.articleList.innerHTML = "";
 
-  hotUrls.forEach((item) => els.hotList.appendChild(sourceItem(item.title, shortText(item.note, 76))));
-  articles.forEach((item) => els.articleList.appendChild(sourceItem(item.title, shortText(item.summary, 76))));
+  hotUrls.forEach((item) =>
+    els.hotList.appendChild(sourceItem(item.title, shortText(item.note, 70), (item.tags || [])[0] || item.date || "热点"))
+  );
+  articles.forEach((item) => els.articleList.appendChild(sourceItem(item.title, shortText(item.summary, 70), "文章")));
 }
 
-function renderResult(raw) {
+function renderResult(raw, options = {}) {
   state.lastRaw = raw;
   state.parsed = normalizeResponse(raw);
   els.rawOutput.textContent = JSON.stringify(raw, null, 2);
@@ -192,6 +254,60 @@ function renderResult(raw) {
   renderRecommended();
   renderTopics();
   renderPreview();
+  renderChat(els.promptInput.value.trim(), state.parsed, raw);
+
+  if (!options.skipHistory) {
+    saveHistoryEntry({
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: Date.now(),
+      message: els.promptInput.value.trim(),
+      title: resultHeadline(state.parsed),
+      raw
+    });
+  }
+}
+
+function renderChat(message, parsed, raw) {
+  const topics = parsed?.topics || [];
+  const recommendedTitle = resultHeadline(parsed);
+  const mode = raw?.mode || "done";
+
+  els.chatThread.innerHTML = `
+    <div class="chat-message user">
+      <div class="chat-role">You</div>
+      <div class="chat-bubble">${escapeHtml(message || "生成今日公众号选题")}</div>
+    </div>
+    <div class="chat-message assistant">
+      <div class="chat-role">Agent · ${escapeHtml(mode)}</div>
+      <div class="chat-bubble">
+        <h4>${escapeHtml(recommendedTitle)}</h4>
+        <div>${escapeHtml(shortText(parsed?.summary || "", 220))}</div>
+        ${
+          topics.length
+            ? `<ul>${topics
+                .slice(0, 5)
+                .map((topic, index) => `<li>${escapeHtml(`Topic ${index + 1}: ${topicTitle(topic, index)}`)}</li>`)
+                .join("")}</ul>`
+            : ""
+        }
+      </div>
+    </div>
+  `;
+  els.chatThread.scrollTop = els.chatThread.scrollHeight;
+}
+
+function renderPendingChat(message) {
+  els.chatThread.innerHTML = `
+    <div class="chat-message user">
+      <div class="chat-role">You</div>
+      <div class="chat-bubble">${escapeHtml(message || "生成今日公众号选题")}</div>
+    </div>
+    <div class="chat-message assistant">
+      <div class="chat-role">Agent</div>
+      <div class="chat-bubble">正在读取今日热点、分析账号风格并生成选题...</div>
+    </div>
+  `;
+  els.chatThread.scrollTop = els.chatThread.scrollHeight;
 }
 
 function renderRecommended() {
@@ -258,6 +374,7 @@ async function generate() {
   const message = els.promptInput.value.trim();
   els.generateBtn.disabled = true;
   els.requestStatus.textContent = state.mode === "model" ? "DeepSeek 生成中" : "Local 生成中";
+  renderPendingChat(message);
 
   try {
     const res = await fetch("/topic", {
@@ -309,6 +426,16 @@ els.downloadBtn.addEventListener("click", downloadResult);
 
 setMode("model");
 initIcons();
+loadHistory();
+els.chatThread.innerHTML = `
+  <div class="chat-message assistant">
+    <div class="chat-role">Agent</div>
+    <div class="chat-bubble">
+      <h4>今天想追哪条 AI 热点？</h4>
+      <div>我会结合左侧今日热点、最近文章和账号规则，生成适合公众号的选题方案。</div>
+    </div>
+  </div>
+`;
 loadMaterials().catch((error) => {
   els.materialLabel.textContent = "素材读取失败";
   els.rawOutput.textContent = error.message;
